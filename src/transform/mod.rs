@@ -99,6 +99,7 @@ pub mod editable;
 pub mod error;
 pub mod fallback;
 mod functions;
+mod handler;
 mod multi;
 mod reader;
 pub mod span;

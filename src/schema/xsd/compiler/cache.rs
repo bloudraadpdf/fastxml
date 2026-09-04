@@ -126,11 +126,23 @@ impl XsdCompiler {
         };
 
         let mut flattened = FlattenedChildren::with_content_model(content_model_type);
+        // mangwhap fork: also record the declared element ORDER. Upstream
+        // 0.9.0 populated only `constraints` here, leaving
+        // `ordered_elements` empty for every cached (named) complex type;
+        // `validate_sequence_order` then silently no-ops on cache hits,
+        // so an out-of-order `xs:sequence` child was wrongly accepted (it
+        // behaved like `xs:all`). The runtime fallback
+        // `compute_flattened_children` already filled `ordered_elements`,
+        // so this mirrors it for the cached path. Legacy ZUGFeRD-1
+        // structural validation depends on ordered-sequence enforcement.
+        let mut ordered: Vec<String> = Vec::with_capacity(elements.len());
         for elem in elements {
             flattened
                 .constraints
                 .insert(elem.name.clone(), (elem.min_occurs, elem.max_occurs));
+            ordered.push(elem.name.clone());
         }
+        flattened.ordered_elements = std::sync::Arc::from(ordered);
 
         flattened
     }
@@ -184,5 +196,82 @@ impl XsdCompiler {
         }
 
         elements
+    }
+}
+
+#[cfg(test)]
+mod order_fix_tests {
+    //! mangwhap fork regression: `flatten_type_children_ns` (the cached
+    //! flattening path for named complex types) now records
+    //! `ordered_elements`, so `validate_sequence_order` enforces
+    //! `xs:sequence` element order on cache hits. Upstream 0.9.0 left
+    //! `ordered_elements` empty here, making `xs:sequence` behave like
+    //! `xs:all` whenever the type was resolved from the namespace cache
+    //! (i.e. for every named type — the common case, and the only case
+    //! ZUGFeRD-1's `ram:*` types take).
+    //!
+    //! These drive the public `Schema::from_xsd` + `Validator::run`
+    //! (streaming) path, which is the path that hits the cache.
+
+    use crate::schema::{Schema, Validator};
+
+    // A named complex type (`m:T`) with an ordered two-element sequence.
+    // Referencing it by name forces the cached flattening path.
+    const SEQ_SCHEMA: &str = r#"<?xml version="1.0"?>
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:m="urn:main"
+           targetNamespace="urn:main" elementFormDefault="qualified">
+  <xs:complexType name="T"><xs:sequence>
+    <xs:element name="a" type="xs:string"/>
+    <xs:element name="b" type="xs:string"/>
+  </xs:sequence></xs:complexType>
+  <xs:element name="Root" type="m:T"/>
+</xs:schema>"#;
+
+    const ALL_SCHEMA: &str = r#"<?xml version="1.0"?>
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:m="urn:main"
+           targetNamespace="urn:main" elementFormDefault="qualified">
+  <xs:complexType name="T"><xs:all>
+    <xs:element name="a" type="xs:string"/>
+    <xs:element name="b" type="xs:string"/>
+  </xs:all></xs:complexType>
+  <xs:element name="Root" type="m:T"/>
+</xs:schema>"#;
+
+    fn is_valid(schema_xsd: &str, xml: &str) -> bool {
+        let schema = Schema::from_xsd(schema_xsd.as_bytes()).unwrap();
+        Validator::from(xml)
+            .schema(schema)
+            .run()
+            .unwrap()
+            .is_valid()
+    }
+
+    #[test]
+    fn sequence_in_declared_order_is_valid() {
+        assert!(is_valid(
+            SEQ_SCHEMA,
+            r#"<m:Root xmlns:m="urn:main"><m:a>x</m:a><m:b>y</m:b></m:Root>"#
+        ));
+    }
+
+    #[test]
+    fn sequence_out_of_order_is_rejected() {
+        // The fix: a cached named-type sequence now enforces order.
+        assert!(
+            !is_valid(
+                SEQ_SCHEMA,
+                r#"<m:Root xmlns:m="urn:main"><m:b>y</m:b><m:a>x</m:a></m:Root>"#
+            ),
+            "out-of-order xs:sequence must be rejected (the ordered_elements cache fix)"
+        );
+    }
+
+    #[test]
+    fn all_remains_order_agnostic() {
+        // xs:all must NOT be order-constrained by the fix.
+        assert!(is_valid(
+            ALL_SCHEMA,
+            r#"<m:Root xmlns:m="urn:main"><m:b>y</m:b><m:a>x</m:a></m:Root>"#
+        ));
     }
 }

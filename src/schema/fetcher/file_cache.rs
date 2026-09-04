@@ -20,6 +20,82 @@ fn cache_filename(url: &str) -> String {
     format!("{:016x}.xsd", hash)
 }
 
+struct FileCache {
+    directory: PathBuf,
+    _temp_dir: Option<tempfile::TempDir>,
+    index: DashMap<String, PathBuf>,
+}
+
+impl FileCache {
+    fn temporary() -> Result<Self> {
+        Ok(Self::from_temp_dir(tempfile::TempDir::new()?))
+    }
+
+    fn persistent(directory: impl AsRef<Path>) -> Self {
+        Self {
+            directory: directory.as_ref().to_path_buf(),
+            _temp_dir: None,
+            index: DashMap::new(),
+        }
+    }
+
+    fn temporary_in(directory: impl AsRef<Path>) -> Result<Self> {
+        Ok(Self::from_temp_dir(tempfile::TempDir::new_in(directory)?))
+    }
+
+    fn from_temp_dir(temp_dir: tempfile::TempDir) -> Self {
+        Self {
+            directory: temp_dir.path().to_path_buf(),
+            _temp_dir: Some(temp_dir),
+            index: DashMap::new(),
+        }
+    }
+
+    fn path_for(&self, url: &str) -> PathBuf {
+        self.directory.join(cache_filename(url))
+    }
+
+    fn cached_path(&self, url: &str) -> Option<PathBuf> {
+        self.index.get(url).map(|entry| entry.value().clone())
+    }
+
+    fn insert(&self, url: &str, path: PathBuf) {
+        self.index.insert(url.to_string(), path);
+    }
+
+    fn len(&self) -> usize {
+        self.index.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.index.is_empty()
+    }
+}
+
+macro_rules! file_cache_accessors {
+    () => {
+        /// Returns the number of cached entries.
+        pub fn len(&self) -> usize {
+            self.cache.len()
+        }
+
+        /// Returns `true` if the cache is empty.
+        pub fn is_empty(&self) -> bool {
+            self.cache.is_empty()
+        }
+
+        /// Returns a reference to the inner fetcher.
+        pub fn inner(&self) -> &F {
+            &self.inner
+        }
+
+        /// Returns the cache directory path.
+        pub fn cache_dir(&self) -> &Path {
+            &self.cache.directory
+        }
+    };
+}
+
 /// A fetcher wrapper that caches fetch results as files on disk.
 ///
 /// When a URL is requested:
@@ -49,10 +125,7 @@ fn cache_filename(url: &str) -> String {
 /// ```
 pub struct FileCachingFetcher<F: SchemaFetcher> {
     inner: F,
-    cache_dir: PathBuf,
-    /// `Some` → temp dir is deleted on drop; `None` → persistent directory.
-    _temp_dir: Option<tempfile::TempDir>,
-    index: DashMap<String, PathBuf>,
+    cache: FileCache,
 }
 
 impl<F: SchemaFetcher> FileCachingFetcher<F> {
@@ -60,13 +133,9 @@ impl<F: SchemaFetcher> FileCachingFetcher<F> {
     ///
     /// The temporary directory is deleted when this fetcher is dropped.
     pub fn new(inner: F) -> Result<Self> {
-        let temp_dir = tempfile::TempDir::new()?;
-        let cache_dir = temp_dir.path().to_path_buf();
         Ok(Self {
             inner,
-            cache_dir,
-            _temp_dir: Some(temp_dir),
-            index: DashMap::new(),
+            cache: FileCache::temporary()?,
         })
     }
 
@@ -77,9 +146,7 @@ impl<F: SchemaFetcher> FileCachingFetcher<F> {
     pub fn with_dir(inner: F, dir: impl AsRef<Path>) -> Self {
         Self {
             inner,
-            cache_dir: dir.as_ref().to_path_buf(),
-            _temp_dir: None,
-            index: DashMap::new(),
+            cache: FileCache::persistent(dir),
         }
     }
 
@@ -87,51 +154,27 @@ impl<F: SchemaFetcher> FileCachingFetcher<F> {
     ///
     /// The temporary sub-directory is deleted when the fetcher is dropped.
     pub fn with_temp_dir(inner: F, dir: impl AsRef<Path>) -> Result<Self> {
-        let temp_dir = tempfile::TempDir::new_in(dir)?;
-        let cache_dir = temp_dir.path().to_path_buf();
         Ok(Self {
             inner,
-            cache_dir,
-            _temp_dir: Some(temp_dir),
-            index: DashMap::new(),
+            cache: FileCache::temporary_in(dir)?,
         })
     }
 
     /// Pre-seeds the cache with content for a given URL.
     pub fn seed(&self, url: &str, content: Vec<u8>) -> Result<()> {
-        let filename = cache_filename(url);
-        let path = self.cache_dir.join(&filename);
+        let path = self.cache.path_for(url);
         std::fs::write(&path, &content)?;
-        self.index.insert(url.to_string(), path);
+        self.cache.insert(url, path);
         Ok(())
     }
 
-    /// Returns the number of cached entries.
-    pub fn len(&self) -> usize {
-        self.index.len()
-    }
-
-    /// Returns `true` if the cache is empty.
-    pub fn is_empty(&self) -> bool {
-        self.index.is_empty()
-    }
-
-    /// Returns a reference to the inner fetcher.
-    pub fn inner(&self) -> &F {
-        &self.inner
-    }
-
-    /// Returns the cache directory path.
-    pub fn cache_dir(&self) -> &Path {
-        &self.cache_dir
-    }
+    file_cache_accessors!();
 
     /// Writes content to a cache file and registers it in the index for the given URL.
     fn write_cache(&self, url: &str, content: &[u8]) -> Result<PathBuf> {
-        let filename = cache_filename(url);
-        let path = self.cache_dir.join(&filename);
+        let path = self.cache.path_for(url);
         std::fs::write(&path, content)?;
-        self.index.insert(url.to_string(), path.clone());
+        self.cache.insert(url, path.clone());
         Ok(path)
     }
 }
@@ -139,8 +182,8 @@ impl<F: SchemaFetcher> FileCachingFetcher<F> {
 impl<F: SchemaFetcher> SchemaFetcher for FileCachingFetcher<F> {
     fn fetch(&self, url: &str) -> Result<FetchResult> {
         // Check index — read from file cache
-        if let Some(entry) = self.index.get(url) {
-            let content = std::fs::read(entry.value())?;
+        if let Some(path) = self.cache.cached_path(url) {
+            let content = std::fs::read(path)?;
             return Ok(FetchResult {
                 content,
                 final_url: url.to_string(),
@@ -156,7 +199,7 @@ impl<F: SchemaFetcher> SchemaFetcher for FileCachingFetcher<F> {
 
         // Also register under the final URL if a redirect occurred
         if result.final_url != url {
-            self.index.insert(result.final_url.clone(), path);
+            self.cache.insert(&result.final_url, path);
         }
 
         Ok(result)
@@ -170,22 +213,16 @@ impl<F: SchemaFetcher> SchemaFetcher for FileCachingFetcher<F> {
 #[cfg(feature = "tokio")]
 pub struct AsyncFileCachingFetcher<F: super::traits::AsyncSchemaFetcher> {
     inner: F,
-    cache_dir: PathBuf,
-    _temp_dir: Option<tempfile::TempDir>,
-    index: DashMap<String, PathBuf>,
+    cache: FileCache,
 }
 
 #[cfg(feature = "tokio")]
 impl<F: super::traits::AsyncSchemaFetcher> AsyncFileCachingFetcher<F> {
     /// Creates a new async file-caching fetcher with an auto-created temporary directory.
     pub fn new(inner: F) -> Result<Self> {
-        let temp_dir = tempfile::TempDir::new()?;
-        let cache_dir = temp_dir.path().to_path_buf();
         Ok(Self {
             inner,
-            cache_dir,
-            _temp_dir: Some(temp_dir),
-            index: DashMap::new(),
+            cache: FileCache::temporary()?,
         })
     }
 
@@ -193,52 +230,27 @@ impl<F: super::traits::AsyncSchemaFetcher> AsyncFileCachingFetcher<F> {
     pub fn with_dir(inner: F, dir: impl AsRef<Path>) -> Self {
         Self {
             inner,
-            cache_dir: dir.as_ref().to_path_buf(),
-            _temp_dir: None,
-            index: DashMap::new(),
+            cache: FileCache::persistent(dir),
         }
     }
 
     /// Creates an async file-caching fetcher with a temporary directory inside `dir`.
     pub fn with_temp_dir(inner: F, dir: impl AsRef<Path>) -> Result<Self> {
-        let temp_dir = tempfile::TempDir::new_in(dir)?;
-        let cache_dir = temp_dir.path().to_path_buf();
         Ok(Self {
             inner,
-            cache_dir,
-            _temp_dir: Some(temp_dir),
-            index: DashMap::new(),
+            cache: FileCache::temporary_in(dir)?,
         })
     }
 
     /// Pre-seeds the cache with content for a given URL.
     pub async fn seed(&self, url: &str, content: Vec<u8>) -> Result<()> {
-        let filename = cache_filename(url);
-        let path = self.cache_dir.join(&filename);
+        let path = self.cache.path_for(url);
         tokio::fs::write(&path, &content).await?;
-        self.index.insert(url.to_string(), path);
+        self.cache.insert(url, path);
         Ok(())
     }
 
-    /// Returns the number of cached entries.
-    pub fn len(&self) -> usize {
-        self.index.len()
-    }
-
-    /// Returns `true` if the cache is empty.
-    pub fn is_empty(&self) -> bool {
-        self.index.is_empty()
-    }
-
-    /// Returns a reference to the inner fetcher.
-    pub fn inner(&self) -> &F {
-        &self.inner
-    }
-
-    /// Returns the cache directory path.
-    pub fn cache_dir(&self) -> &Path {
-        &self.cache_dir
-    }
+    file_cache_accessors!();
 }
 
 #[cfg(feature = "tokio")]
@@ -248,8 +260,8 @@ impl<F: super::traits::AsyncSchemaFetcher> super::traits::AsyncSchemaFetcher
 {
     async fn fetch(&self, url: &str) -> Result<FetchResult> {
         // Check index — read from file cache
-        if let Some(entry) = self.index.get(url) {
-            let content = tokio::fs::read(entry.value()).await?;
+        if let Some(path) = self.cache.cached_path(url) {
+            let content = tokio::fs::read(path).await?;
             return Ok(FetchResult {
                 content,
                 final_url: url.to_string(),
@@ -261,14 +273,13 @@ impl<F: super::traits::AsyncSchemaFetcher> super::traits::AsyncSchemaFetcher
         let result = self.inner.fetch(url).await?;
 
         // Write to file cache
-        let filename = cache_filename(url);
-        let path = self.cache_dir.join(&filename);
+        let path = self.cache.path_for(url);
         tokio::fs::write(&path, &result.content).await?;
-        self.index.insert(url.to_string(), path.clone());
+        self.cache.insert(url, path.clone());
 
         // Also register under the final URL if a redirect occurred
         if result.final_url != url {
-            self.index.insert(result.final_url.clone(), path);
+            self.cache.insert(&result.final_url, path);
         }
 
         Ok(result)
@@ -278,46 +289,8 @@ impl<F: super::traits::AsyncSchemaFetcher> super::traits::AsyncSchemaFetcher
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schema::fetcher::NoopFetcher;
+    use crate::schema::fetcher::{NoopFetcher, test_support::TrackingFetcher};
     use std::collections::HashMap;
-    use std::sync::{Arc, Mutex};
-
-    /// A mock fetcher that tracks fetch calls.
-    struct TrackingFetcher {
-        responses: HashMap<String, Vec<u8>>,
-        calls: Arc<Mutex<Vec<String>>>,
-    }
-
-    impl TrackingFetcher {
-        fn new(responses: HashMap<String, Vec<u8>>) -> Self {
-            Self {
-                responses,
-                calls: Arc::new(Mutex::new(Vec::new())),
-            }
-        }
-
-        fn call_count(&self) -> usize {
-            self.calls.lock().unwrap().len()
-        }
-    }
-
-    impl SchemaFetcher for TrackingFetcher {
-        fn fetch(&self, url: &str) -> Result<FetchResult> {
-            self.calls.lock().unwrap().push(url.to_string());
-            match self.responses.get(url) {
-                Some(content) => Ok(FetchResult {
-                    content: content.clone(),
-                    final_url: url.to_string(),
-                    redirected: false,
-                }),
-                None => Err(crate::schema::fetcher::error::FetchError::RequestFailed {
-                    url: url.to_string(),
-                    message: "Not found".to_string(),
-                }
-                .into()),
-            }
-        }
-    }
 
     /// A mock fetcher that simulates redirects.
     struct RedirectFetcher {

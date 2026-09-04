@@ -3,9 +3,10 @@
 use crate::error::{ErrorLevel, StructuredError, ValidationErrorType};
 use crate::node::{NodeType, XmlNode};
 use crate::schema::types::{ContentModel, ElementDef, SimpleType, TypeDef};
-use crate::schema::xsd::facets::{FacetConstraints, FacetValidator};
+use crate::schema::xsd::facets::FacetValidator;
 use crate::schema::xsd::primitive::PrimitiveKind;
 
+use super::super::lookup::facet_constraints;
 use super::DomSchemaValidator;
 
 impl DomSchemaValidator {
@@ -116,7 +117,7 @@ impl DomSchemaValidator {
         // pass, but more importantly we don't want a spurious extra error on
         // top of any primitive-level "empty value" error.
         if !text_content.is_empty() {
-            let constraints = self.create_facet_constraints(simple);
+            let constraints = facet_constraints(simple);
             let validator = FacetValidator::new(&constraints);
             if let Err(facet_error) = validator.validate(text_content) {
                 let node_name = node.get_name();
@@ -159,32 +160,6 @@ impl DomSchemaValidator {
                 errors.push(error);
             }
         }
-    }
-
-    /// Creates FacetConstraints from a SimpleType definition.
-    pub(crate) fn create_facet_constraints(&self, simple: &SimpleType) -> FacetConstraints {
-        let mut constraints = FacetConstraints::new();
-
-        if let Some(min_len) = simple.min_length {
-            constraints = constraints.with_min_length(min_len as usize);
-        }
-        if let Some(max_len) = simple.max_length {
-            constraints = constraints.with_max_length(max_len as usize);
-        }
-        if let Some(ref min_inc) = simple.min_inclusive {
-            constraints = constraints.with_min_inclusive(min_inc.clone());
-        }
-        if let Some(ref max_inc) = simple.max_inclusive {
-            constraints = constraints.with_max_inclusive(max_inc.clone());
-        }
-        if !simple.enumeration.is_empty() {
-            constraints = constraints.with_enumeration(simple.enumeration.clone());
-        }
-        if let Some(ref pattern) = simple.pattern {
-            constraints = constraints.with_pattern(pattern.clone());
-        }
-
-        constraints
     }
 
     /// Creates a structured error with context.

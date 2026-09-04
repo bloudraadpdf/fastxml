@@ -357,24 +357,19 @@ impl ContentModelValidator {
         name: &str,
         group: &CompositorGroup,
     ) -> Result<(), ContentModelError> {
-        match group.compositor_type {
-            CompositorType::Sequence => self.validate_in_sequence(name, &group.elements),
-            CompositorType::Choice => self.validate_in_choice(name, &group.elements),
-            CompositorType::All => self.validate_in_all(name, &group.elements),
-        }
+        self.validate_in_items(name, &group.elements, group.compositor_type)
     }
 
-    fn validate_in_sequence(
+    fn validate_in_items(
         &mut self,
         name: &str,
         elements: &[ContentModelItem],
+        compositor_type: CompositorType,
     ) -> Result<(), ContentModelError> {
-        // Find the element and check it appears in valid sequence position
         for (idx, item) in elements.iter().enumerate() {
             match item {
                 ContentModelItem::Element(elem) => {
                     if elem.name == name {
-                        // Check if we can still add this element
                         let count = self.state.get_count(name);
                         if !elem.occurrence.can_add_more(count) {
                             return Err(ContentModelError::TooManyOccurrences {
@@ -384,10 +379,9 @@ impl ContentModelValidator {
                             });
                         }
 
-                        // Check strict sequence order
-                        if idx < self.state.sequence_position {
-                            // Element appears before current position - not allowed
-                            // Find the name of the element at the current position
+                        if compositor_type == CompositorType::Sequence
+                            && idx < self.state.sequence_position
+                        {
                             let after = elements
                                 .get(self.state.sequence_position)
                                 .and_then(|item| match item {
@@ -402,140 +396,38 @@ impl ContentModelValidator {
                         }
 
                         self.state.increment(name);
-                        self.state.sequence_position = idx;
-                        return Ok(());
-                    }
-                }
-                ContentModelItem::Group(nested) => {
-                    if self.validate_element_in_group(name, nested).is_ok() {
-                        return Ok(());
-                    }
-                }
-                ContentModelItem::Any { occurrence, .. } => {
-                    // Any element matches - check occurrence constraint
-                    let count = self.state.get_any_count(idx);
-                    if !occurrence.can_add_more(count) {
-                        continue; // This xs:any is full, try next item
-                    }
-                    self.state.increment_any(idx);
-                    self.state.sequence_position = idx;
-                    return Ok(());
-                }
-            }
-        }
-
-        // Element not found
-        let expected: Vec<String> = elements
-            .iter()
-            .filter_map(|item| match item {
-                ContentModelItem::Element(e) => Some(e.name.clone()),
-                ContentModelItem::Any { .. } => Some("(any)".to_string()),
-                _ => None,
-            })
-            .collect();
-
-        Err(ContentModelError::UnexpectedElement {
-            element: name.to_string(),
-            expected,
-        })
-    }
-
-    fn validate_in_choice(
-        &mut self,
-        name: &str,
-        elements: &[ContentModelItem],
-    ) -> Result<(), ContentModelError> {
-        // In a choice, any one element is valid
-        for (idx, item) in elements.iter().enumerate() {
-            match item {
-                ContentModelItem::Element(elem) => {
-                    if elem.name == name {
-                        let count = self.state.get_count(name);
-                        if !elem.occurrence.can_add_more(count) {
-                            return Err(ContentModelError::TooManyOccurrences {
-                                element: name.to_string(),
-                                max: elem.occurrence.max.unwrap_or(u32::MAX),
-                                found: count + 1,
-                            });
+                        if compositor_type == CompositorType::Sequence {
+                            self.state.sequence_position = idx;
                         }
-                        self.state.increment(name);
                         return Ok(());
                     }
                 }
-                ContentModelItem::Group(nested) => {
-                    if self.validate_element_in_group(name, nested).is_ok() {
-                        return Ok(());
-                    }
+                ContentModelItem::Group(nested)
+                    if self.validate_element_in_group(name, nested).is_ok() =>
+                {
+                    return Ok(());
                 }
                 ContentModelItem::Any { occurrence, .. } => {
                     let count = self.state.get_any_count(idx);
-                    if !occurrence.can_add_more(count) {
-                        continue;
-                    }
-                    self.state.increment_any(idx);
-                    return Ok(());
-                }
-            }
-        }
-
-        let expected: Vec<String> = elements
-            .iter()
-            .filter_map(|item| match item {
-                ContentModelItem::Element(e) => Some(e.name.clone()),
-                _ => None,
-            })
-            .collect();
-
-        Err(ContentModelError::UnexpectedElement {
-            element: name.to_string(),
-            expected,
-        })
-    }
-
-    fn validate_in_all(
-        &mut self,
-        name: &str,
-        elements: &[ContentModelItem],
-    ) -> Result<(), ContentModelError> {
-        // In an all group, elements can appear in any order
-        // but each must appear exactly according to its occurrence
-        for (idx, item) in elements.iter().enumerate() {
-            match item {
-                ContentModelItem::Element(elem) => {
-                    if elem.name == name {
-                        let count = self.state.get_count(name);
-                        if !elem.occurrence.can_add_more(count) {
-                            return Err(ContentModelError::TooManyOccurrences {
-                                element: name.to_string(),
-                                max: elem.occurrence.max.unwrap_or(u32::MAX),
-                                found: count + 1,
-                            });
+                    if occurrence.can_add_more(count) {
+                        self.state.increment_any(idx);
+                        if compositor_type == CompositorType::Sequence {
+                            self.state.sequence_position = idx;
                         }
-                        self.state.increment(name);
                         return Ok(());
                     }
                 }
-                ContentModelItem::Group(nested) => {
-                    if self.validate_element_in_group(name, nested).is_ok() {
-                        return Ok(());
-                    }
-                }
-                ContentModelItem::Any { occurrence, .. } => {
-                    let count = self.state.get_any_count(idx);
-                    if !occurrence.can_add_more(count) {
-                        continue;
-                    }
-                    self.state.increment_any(idx);
-                    return Ok(());
-                }
+                ContentModelItem::Group(_) => {}
             }
         }
 
-        let expected: Vec<String> = elements
+        let expected = elements
             .iter()
             .filter_map(|item| match item {
                 ContentModelItem::Element(e) => Some(e.name.clone()),
-                ContentModelItem::Any { .. } => Some("(any)".to_string()),
+                ContentModelItem::Any { .. } if compositor_type != CompositorType::Choice => {
+                    Some("(any)".to_string())
+                }
                 _ => None,
             })
             .collect();

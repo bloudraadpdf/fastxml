@@ -256,6 +256,30 @@ impl DocumentBuilder {
         }
     }
 
+    fn allocate_node_id(&mut self) -> NodeId {
+        let id = self.next_id;
+        self.next_id += 1;
+        id
+    }
+
+    fn append_child(&mut self, mut node: NodeData) -> NodeId {
+        let id = node.id;
+        let parent_id = *self.node_stack.last().unwrap_or(&0);
+        node.parent = Some(parent_id);
+
+        if let Some(parent) = self.nodes.get_mut(parent_id) {
+            parent.children.push(id);
+        }
+
+        self.nodes.push(node);
+        id
+    }
+
+    fn add_child(&mut self, create_node: impl FnOnce(NodeId) -> NodeData) -> NodeId {
+        let id = self.allocate_node_id();
+        self.append_child(create_node(id))
+    }
+
     /// Starts a new element.
     #[allow(clippy::too_many_arguments)]
     pub fn start_element(
@@ -269,8 +293,7 @@ impl DocumentBuilder {
         line: Option<usize>,
         column: Option<usize>,
     ) -> NodeId {
-        let id = self.next_id;
-        self.next_id += 1;
+        let id = self.allocate_node_id();
 
         let mut node = NodeData::element(
             id,
@@ -295,14 +318,7 @@ impl DocumentBuilder {
         node.column = column;
 
         let parent_id = *self.node_stack.last().unwrap_or(&0);
-        node.parent = Some(parent_id);
-
-        // Add as child of parent (direct access, no lock needed)
-        if let Some(parent) = self.nodes.get_mut(parent_id) {
-            parent.children.push(id);
-        }
-
-        self.nodes.push(node);
+        self.append_child(node);
 
         // Set as root element if this is the first element
         if self.root_element_id.is_none() && parent_id == 0 {
@@ -324,78 +340,24 @@ impl DocumentBuilder {
             return 0; // Don't add empty text nodes
         }
 
-        let id = self.next_id;
-        self.next_id += 1;
-
-        let mut node = NodeData::text(id, content.to_string());
-        let parent_id = *self.node_stack.last().unwrap_or(&0);
-        node.parent = Some(parent_id);
-
-        // Add as child of parent (direct access, no lock needed)
-        if let Some(parent) = self.nodes.get_mut(parent_id) {
-            parent.children.push(id);
-        }
-
-        self.nodes.push(node);
-        id
+        self.add_child(|id| NodeData::text(id, content.to_string()))
     }
 
     /// Adds a CDATA node.
     pub fn cdata(&mut self, content: &str) -> NodeId {
-        let id = self.next_id;
-        self.next_id += 1;
-
-        let mut node = NodeData::cdata(id, content.to_string());
-        let parent_id = *self.node_stack.last().unwrap_or(&0);
-        node.parent = Some(parent_id);
-
-        // Add as child of parent (direct access, no lock needed)
-        if let Some(parent) = self.nodes.get_mut(parent_id) {
-            parent.children.push(id);
-        }
-
-        self.nodes.push(node);
-        id
+        self.add_child(|id| NodeData::cdata(id, content.to_string()))
     }
 
     /// Adds a comment node.
     pub fn comment(&mut self, content: &str) -> NodeId {
-        let id = self.next_id;
-        self.next_id += 1;
-
-        let mut node = NodeData::comment(id, content.to_string());
-        let parent_id = *self.node_stack.last().unwrap_or(&0);
-        node.parent = Some(parent_id);
-
-        // Add as child of parent (direct access, no lock needed)
-        if let Some(parent) = self.nodes.get_mut(parent_id) {
-            parent.children.push(id);
-        }
-
-        self.nodes.push(node);
-        id
+        self.add_child(|id| NodeData::comment(id, content.to_string()))
     }
 
     /// Adds a processing instruction.
     pub fn processing_instruction(&mut self, target: &str, content: Option<&str>) -> NodeId {
-        let id = self.next_id;
-        self.next_id += 1;
-
-        let mut node = NodeData::processing_instruction(
-            id,
-            target.to_string(),
-            content.map(|s| s.to_string()),
-        );
-        let parent_id = *self.node_stack.last().unwrap_or(&0);
-        node.parent = Some(parent_id);
-
-        // Add as child of parent (direct access, no lock needed)
-        if let Some(parent) = self.nodes.get_mut(parent_id) {
-            parent.children.push(id);
-        }
-
-        self.nodes.push(node);
-        id
+        self.add_child(|id| {
+            NodeData::processing_instruction(id, target.to_string(), content.map(str::to_string))
+        })
     }
 
     /// Finishes building and returns the document.

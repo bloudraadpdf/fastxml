@@ -3,6 +3,7 @@
 //! This module provides an event-based interface for processing XML
 //! that enables single-pass parsing with optional validation.
 
+use crate::TextContent;
 use std::any::Any;
 use std::collections::HashMap;
 use std::io::BufRead;
@@ -183,11 +184,21 @@ impl<R: BufRead> StreamingParser<R> {
         F: FnMut(&XmlEvent) -> Result<()>,
     {
         let mut buffer = Vec::with_capacity(8 * 1024);
+        let mut pending_text = String::new();
 
         loop {
             let event_result = self.reader.read_event_into(&mut buffer);
             let line = self.current_line();
             let column = self.current_column();
+
+            // quick-xml 0.41 emits entity + character references as their own `GeneralRef`
+            // events, splitting a text run; buffer text and resolved entities, flushing one
+            // `Text` event at the next non-text event (pre-0.41 one-event-per-text-run shape).
+            if !matches!(&event_result, Ok(Event::Text(_)) | Ok(Event::GeneralRef(_)))
+                && !pending_text.is_empty()
+            {
+                on_event(&XmlEvent::Text(std::mem::take(&mut pending_text)))?;
+            }
 
             match event_result {
                 Ok(Event::Start(ref e)) => {
@@ -223,15 +234,28 @@ impl<R: BufRead> StreamingParser<R> {
                     on_event(&event)?;
                 }
                 Ok(Event::Text(ref e)) => {
-                    let text = e.unescape().map_err(|e| {
+                    let text = e.text_content().map_err(|e| {
                         crate::parser::error::ParseError::TextDecodeError {
                             message: e.to_string(),
                         }
                     })?;
-                    if !text.is_empty() {
-                        let event = XmlEvent::Text(text.into_owned());
-                        on_event(&event)?;
-                    }
+                    pending_text.push_str(&text);
+                }
+                Ok(Event::GeneralRef(ref e)) => {
+                    // Reconstruct `&name;` and resolve via escape::unescape (predefined
+                    // entities + character references), matching the pre-0.41 inline text.
+                    let name = e.decode().map_err(|e| {
+                        crate::parser::error::ParseError::TextDecodeError {
+                            message: e.to_string(),
+                        }
+                    })?;
+                    let entity = format!("&{name};");
+                    let resolved = quick_xml::escape::unescape(&entity).map_err(|e| {
+                        crate::parser::error::ParseError::TextDecodeError {
+                            message: e.to_string(),
+                        }
+                    })?;
+                    pending_text.push_str(&resolved);
                 }
                 Ok(Event::CData(ref e)) => {
                     let text = std::str::from_utf8(e.as_ref())?;
@@ -349,7 +373,7 @@ fn convert_start_event(
     for attr_result in e.attributes() {
         let attr = attr_result?;
         let key = std::str::from_utf8(attr.key.as_ref())?;
-        let value = attr.unescape_value().map_err(|e| {
+        let value = crate::decode_attribute_value(&attr, e.decoder()).map_err(|e| {
             crate::parser::error::ParseError::AttributeDecodeError {
                 message: e.to_string(),
             }
@@ -413,6 +437,18 @@ impl XmlEventHandler for EventCollector {
 mod tests {
     use super::*;
 
+    fn start_element(name: &str) -> XmlEvent {
+        XmlEvent::StartElement {
+            name: Arc::from(name),
+            prefix: None,
+            namespace: None,
+            attributes: vec![],
+            namespace_decls: vec![],
+            line: Some(1),
+            column: Some(1),
+        }
+    }
+
     #[test]
     fn test_streaming_parser() {
         let xml = r#"<root attr="value"><child>text</child></root>"#;
@@ -432,29 +468,8 @@ mod tests {
         let mut collector = EventCollector::new();
 
         // Simulate events
-        collector
-            .handle(&XmlEvent::StartElement {
-                name: Arc::from("root"),
-                prefix: None,
-                namespace: None,
-                attributes: vec![],
-                namespace_decls: vec![],
-                line: Some(1),
-                column: Some(1),
-            })
-            .unwrap();
-
-        collector
-            .handle(&XmlEvent::StartElement {
-                name: Arc::from("child"),
-                prefix: None,
-                namespace: None,
-                attributes: vec![],
-                namespace_decls: vec![],
-                line: Some(1),
-                column: Some(1),
-            })
-            .unwrap();
+        collector.handle(&start_element("root")).unwrap();
+        collector.handle(&start_element("child")).unwrap();
 
         collector
             .handle(&XmlEvent::EndElement {

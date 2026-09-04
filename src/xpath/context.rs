@@ -128,14 +128,17 @@ pub fn find_nodes_by_xpath(ctx: &XmlContext, xpath: &str, node: &XmlNode) -> Res
     ctx.find_nodes_from(xpath, node)
 }
 
+fn readonly_nodes(result: Result<Vec<XmlNode>>) -> Result<Vec<XmlRoNode>> {
+    Ok(result?.into_iter().map(XmlRoNode::from_node).collect())
+}
+
 /// Finds read-only nodes by XPath expression.
 pub fn find_readonly_nodes_by_xpath(
     ctx: &XmlContext,
     xpath: &str,
     node: &XmlRoNode,
 ) -> Result<Vec<XmlRoNode>> {
-    let result = ctx.find_nodes_from(xpath, &node.clone().into_node())?;
-    Ok(result.into_iter().map(XmlRoNode::from_node).collect())
+    readonly_nodes(ctx.find_nodes_from(xpath, &node.clone().into_node()))
 }
 
 /// Finds read-only nodes by XPath expression using a thread-safe context.
@@ -144,8 +147,7 @@ pub fn find_safe_readonly_nodes_by_xpath(
     xpath: &str,
     node: &XmlRoNode,
 ) -> Result<Vec<XmlRoNode>> {
-    let result = ctx.find_nodes_from(xpath, &node.clone().into_node())?;
-    Ok(result.into_iter().map(XmlRoNode::from_node).collect())
+    readonly_nodes(ctx.find_nodes_from(xpath, &node.clone().into_node()))
 }
 
 /// Finds read-only nodes matching any of the specified element names.
@@ -179,24 +181,23 @@ mod tests {
     use super::*;
     use crate::parse;
 
+    fn assert_single_child(nodes: Vec<XmlNode>) {
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].get_name(), "child");
+    }
+
     #[test]
     fn test_context() {
         let doc = parse(r#"<root><child>text</child></root>"#).unwrap();
         let ctx = create_context(&doc).unwrap();
-
-        let nodes = ctx.find_nodes("/root/child").unwrap();
-        assert_eq!(nodes.len(), 1);
-        assert_eq!(nodes[0].get_name(), "child");
+        assert_single_child(ctx.find_nodes("/root/child").unwrap());
     }
 
     #[test]
     fn test_safe_context() {
         let doc = parse(r#"<root><child>text</child></root>"#).unwrap();
         let ctx = create_safe_context(&doc).unwrap();
-
-        let nodes = ctx.find_nodes("/root/child").unwrap();
-        assert_eq!(nodes.len(), 1);
-        assert_eq!(nodes[0].get_name(), "child");
+        assert_single_child(ctx.find_nodes("/root/child").unwrap());
     }
 
     #[test]

@@ -13,6 +13,34 @@ fn get_streamable_xpath(xpath_str: &str) -> StreamableXPath {
     }
 }
 
+fn run_multi_handlers(input: &str, handlers: &mut [MultiTransformHandler<'_>]) -> (usize, String) {
+    let mut output = Vec::new();
+    let count = process_streaming_multi(input, handlers, &HashMap::new(), &mut output).unwrap();
+    (count, String::from_utf8(output).unwrap())
+}
+
+fn run_single_multi(
+    input: &str,
+    xpath: &str,
+    mut handler: impl FnMut(&mut EditableNode),
+) -> (usize, String) {
+    let xpath = get_streamable_xpath(xpath);
+    let mut handlers: Vec<MultiTransformHandler<'_>> = vec![(&xpath, &mut handler)];
+    run_multi_handlers(input, &mut handlers)
+}
+
+fn apply_element_types(input: &str) -> (usize, String) {
+    let xpath_item = get_streamable_xpath("//item");
+    let xpath_other = get_streamable_xpath("//other");
+    let mut item_handler = |node: &mut EditableNode| node.set_attribute("type", "item");
+    let mut other_handler = |node: &mut EditableNode| node.set_attribute("type", "other");
+    let mut handlers: Vec<MultiTransformHandler<'_>> = vec![
+        (&xpath_item, &mut item_handler),
+        (&xpath_other, &mut other_handler),
+    ];
+    run_multi_handlers(input, &mut handlers)
+}
+
 #[test]
 fn test_simple_transform() {
     let input = r#"<root><item id="1">A</item><item id="2">B</item></root>"#;
@@ -57,24 +85,7 @@ fn test_no_match() {
 fn test_multi_transform_non_overlapping() {
     // //item and //other match different elements
     let input = r#"<root><item id="1">A</item><other id="2">B</other></root>"#;
-    let xpath_item = get_streamable_xpath("//item");
-    let xpath_other = get_streamable_xpath("//other");
-
-    let mut handler1 = |node: &mut EditableNode| {
-        node.set_attribute("type", "item");
-    };
-    let mut handler2 = |node: &mut EditableNode| {
-        node.set_attribute("type", "other");
-    };
-
-    let mut handlers: Vec<MultiTransformHandler<'_>> =
-        vec![(&xpath_item, &mut handler1), (&xpath_other, &mut handler2)];
-
-    let mut output = Vec::new();
-    let count =
-        process_streaming_multi(input, &mut handlers, &HashMap::new(), &mut output).unwrap();
-
-    let result = String::from_utf8(output).unwrap();
+    let (count, result) = apply_element_types(input);
     assert_eq!(count, 2);
     assert!(result.contains(r#"type="item""#));
     assert!(result.contains(r#"type="other""#));
@@ -84,24 +95,7 @@ fn test_multi_transform_non_overlapping() {
 fn test_multi_transform_interleaved() {
     // <item/><other/><item/> order is preserved
     let input = r#"<root><item>1</item><other>2</other><item>3</item></root>"#;
-    let xpath_item = get_streamable_xpath("//item");
-    let xpath_other = get_streamable_xpath("//other");
-
-    let mut handler1 = |node: &mut EditableNode| {
-        node.set_attribute("type", "item");
-    };
-    let mut handler2 = |node: &mut EditableNode| {
-        node.set_attribute("type", "other");
-    };
-
-    let mut handlers: Vec<MultiTransformHandler<'_>> =
-        vec![(&xpath_item, &mut handler1), (&xpath_other, &mut handler2)];
-
-    let mut output = Vec::new();
-    let count =
-        process_streaming_multi(input, &mut handlers, &HashMap::new(), &mut output).unwrap();
-
-    let result = String::from_utf8(output).unwrap();
+    let (count, result) = apply_element_types(input);
     assert_eq!(count, 3);
 
     // Check that order is preserved
@@ -123,19 +117,9 @@ fn test_multi_transform_zero_copy() {
   <item>transform</item>
   <also-unchanged attr="value">keep this too</also-unchanged>
 </root>"#;
-    let xpath = get_streamable_xpath("//item");
-
-    let mut handler = |node: &mut EditableNode| {
+    let (count, result) = run_single_multi(input, "//item", |node| {
         node.set_attribute("modified", "true");
-    };
-
-    let mut handlers: Vec<MultiTransformHandler<'_>> = vec![(&xpath, &mut handler)];
-
-    let mut output = Vec::new();
-    let count =
-        process_streaming_multi(input, &mut handlers, &HashMap::new(), &mut output).unwrap();
-
-    let result = String::from_utf8(output).unwrap();
+    });
     assert_eq!(count, 1);
 
     // Check that XML declaration is preserved
@@ -156,24 +140,7 @@ fn test_multi_transform_zero_copy() {
 fn test_multi_transform_empty_elements() {
     // Test with empty elements
     let input = r#"<root><item/><other/><item/></root>"#;
-    let xpath_item = get_streamable_xpath("//item");
-    let xpath_other = get_streamable_xpath("//other");
-
-    let mut handler1 = |node: &mut EditableNode| {
-        node.set_attribute("type", "item");
-    };
-    let mut handler2 = |node: &mut EditableNode| {
-        node.set_attribute("type", "other");
-    };
-
-    let mut handlers: Vec<MultiTransformHandler<'_>> =
-        vec![(&xpath_item, &mut handler1), (&xpath_other, &mut handler2)];
-
-    let mut output = Vec::new();
-    let count =
-        process_streaming_multi(input, &mut handlers, &HashMap::new(), &mut output).unwrap();
-
-    let result = String::from_utf8(output).unwrap();
+    let (count, result) = apply_element_types(input);
     assert_eq!(count, 3);
     assert_eq!(result.matches(r#"type="item""#).count(), 2);
     assert_eq!(result.matches(r#"type="other""#).count(), 1);
@@ -241,19 +208,9 @@ fn test_multi_transform_first_match_wins() {
 fn test_multi_transform_remove_elements() {
     // Test removing elements
     let input = r#"<root><keep>A</keep><remove>B</remove><keep>C</keep></root>"#;
-    let xpath_remove = get_streamable_xpath("//remove");
-
-    let mut handler = |node: &mut EditableNode| {
+    let (count, result) = run_single_multi(input, "//remove", |node| {
         node.remove();
-    };
-
-    let mut handlers: Vec<MultiTransformHandler<'_>> = vec![(&xpath_remove, &mut handler)];
-
-    let mut output = Vec::new();
-    let count =
-        process_streaming_multi(input, &mut handlers, &HashMap::new(), &mut output).unwrap();
-
-    let result = String::from_utf8(output).unwrap();
+    });
     assert_eq!(count, 1);
     assert!(!result.contains("<remove>"));
     assert!(result.contains("<keep>A</keep>"));

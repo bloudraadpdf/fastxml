@@ -7,6 +7,7 @@ mod handlers;
 mod helpers;
 mod stack_frame;
 
+use crate::TextContent;
 use std::collections::HashMap;
 
 use crate::error::Result;
@@ -186,7 +187,7 @@ pub fn parse_xsd_ast(content: &[u8]) -> Result<XsdSchema> {
                 xsd_parser.handle(&event)?;
             }
             Ok(Event::Text(ref e)) => {
-                let text = e.unescape().map_err(|e| {
+                let text = e.text_content().map_err(|e| {
                     crate::parser::error::ParseError::TextDecodeError {
                         message: e.to_string(),
                     }
@@ -219,6 +220,62 @@ pub fn parse_xsd_ast(content: &[u8]) -> Result<XsdSchema> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn parse_schema(body: &str) -> XsdSchema {
+        let xsd = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+            <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+                {body}
+            </xs:schema>"#
+        );
+        parse_xsd_ast(xsd.as_bytes()).unwrap()
+    }
+
+    fn complex_type(schema: &XsdSchema) -> &XsdComplexType {
+        let XsdTypeDef::Complex(complex_type) = &schema.types[0] else {
+            panic!("Expected complex type");
+        };
+        complex_type
+    }
+
+    fn simple_type(schema: &XsdSchema) -> &XsdSimpleType {
+        let XsdTypeDef::Simple(simple_type) = &schema.types[0] else {
+            panic!("Expected simple type");
+        };
+        simple_type
+    }
+
+    fn restriction(simple_type: &XsdSimpleType) -> &XsdSimpleRestriction {
+        let XsdSimpleTypeContent::Restriction(restriction) = &simple_type.content else {
+            panic!("Expected restriction");
+        };
+        restriction
+    }
+
+    fn sequence(complex_type: &XsdComplexType) -> &XsdSequence {
+        let XsdComplexContent::Particle(XsdParticle::Sequence(sequence)) = &complex_type.content
+        else {
+            panic!("Expected sequence");
+        };
+        sequence
+    }
+
+    fn parse_identity_constraint(kind: &str, name: &str, refer: Option<&str>) -> XsdSchema {
+        let refer = refer.map_or_else(String::new, |value| format!(r#" refer="{value}""#));
+        parse_schema(&format!(
+            r#"<xs:element name="root">
+                <xs:complexType>
+                    <xs:sequence>
+                        <xs:element name="item" maxOccurs="unbounded"/>
+                    </xs:sequence>
+                </xs:complexType>
+                <xs:{kind} name="{name}"{refer}>
+                    <xs:selector xpath="item"/>
+                    <xs:field xpath="@id"/>
+                </xs:{kind}>
+            </xs:element>"#
+        ))
+    }
 
     // =============================================================================
     // Basic Schema Tests
@@ -281,110 +338,84 @@ mod tests {
 
     #[test]
     fn test_parse_complex_type() {
-        let xsd = r#"<?xml version="1.0" encoding="UTF-8"?>
-        <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
-            <xs:complexType name="PersonType">
+        let schema = parse_schema(
+            r#"<xs:complexType name="PersonType">
                 <xs:sequence>
                     <xs:element name="name" type="xs:string"/>
                     <xs:element name="age" type="xs:integer" minOccurs="0"/>
                 </xs:sequence>
                 <xs:attribute name="id" type="xs:ID" use="required"/>
-            </xs:complexType>
-        </xs:schema>"#;
-
-        let schema = parse_xsd_ast(xsd.as_bytes()).unwrap();
+            </xs:complexType>"#,
+        );
         assert_eq!(schema.types.len(), 1);
 
-        if let XsdTypeDef::Complex(ct) = &schema.types[0] {
-            assert_eq!(ct.name, Some("PersonType".to_string()));
-            assert_eq!(ct.attributes.len(), 1);
-            assert_eq!(ct.attributes[0].name, Some("id".to_string()));
-            assert_eq!(ct.attributes[0].use_, AttributeUse::Required);
-
-            if let XsdComplexContent::Particle(XsdParticle::Sequence(seq)) = &ct.content {
-                assert_eq!(seq.particles.len(), 2);
-            } else {
-                panic!("Expected sequence");
-            }
-        } else {
-            panic!("Expected complex type");
-        }
+        let complex_type = complex_type(&schema);
+        assert_eq!(complex_type.name.as_deref(), Some("PersonType"));
+        assert_eq!(complex_type.attributes.len(), 1);
+        assert_eq!(complex_type.attributes[0].name.as_deref(), Some("id"));
+        assert_eq!(complex_type.attributes[0].use_, AttributeUse::Required);
+        assert_eq!(sequence(complex_type).particles.len(), 2);
     }
 
     #[test]
     fn test_parse_complex_type_choice() {
-        let xsd = r#"<?xml version="1.0" encoding="UTF-8"?>
-        <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
-            <xs:complexType name="ChoiceType">
+        let schema = parse_schema(
+            r#"<xs:complexType name="ChoiceType">
                 <xs:choice>
                     <xs:element name="optionA" type="xs:string"/>
                     <xs:element name="optionB" type="xs:integer"/>
                 </xs:choice>
-            </xs:complexType>
-        </xs:schema>"#;
+            </xs:complexType>"#,
+        );
 
-        let schema = parse_xsd_ast(xsd.as_bytes()).unwrap();
-        if let XsdTypeDef::Complex(ct) = &schema.types[0] {
-            if let XsdComplexContent::Particle(XsdParticle::Choice(choice)) = &ct.content {
-                assert_eq!(choice.particles.len(), 2);
-            } else {
-                panic!("Expected choice");
-            }
-        }
+        let XsdComplexContent::Particle(XsdParticle::Choice(choice)) =
+            &complex_type(&schema).content
+        else {
+            panic!("Expected choice");
+        };
+        assert_eq!(choice.particles.len(), 2);
     }
 
     #[test]
     fn test_parse_complex_type_all() {
-        let xsd = r#"<?xml version="1.0" encoding="UTF-8"?>
-        <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
-            <xs:complexType name="AllType">
+        let schema = parse_schema(
+            r#"<xs:complexType name="AllType">
                 <xs:all>
                     <xs:element name="fieldA" type="xs:string"/>
                     <xs:element name="fieldB" type="xs:string"/>
                 </xs:all>
-            </xs:complexType>
-        </xs:schema>"#;
+            </xs:complexType>"#,
+        );
 
-        let schema = parse_xsd_ast(xsd.as_bytes()).unwrap();
-        if let XsdTypeDef::Complex(ct) = &schema.types[0] {
-            if let XsdComplexContent::Particle(XsdParticle::All(all)) = &ct.content {
-                assert_eq!(all.elements.len(), 2);
-            } else {
-                panic!("Expected all");
-            }
-        }
+        let XsdComplexContent::Particle(XsdParticle::All(all)) = &complex_type(&schema).content
+        else {
+            panic!("Expected all");
+        };
+        assert_eq!(all.elements.len(), 2);
     }
 
     #[test]
     fn test_parse_complex_type_mixed() {
-        let xsd = r#"<?xml version="1.0" encoding="UTF-8"?>
-        <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
-            <xs:complexType name="MixedType" mixed="true">
+        let schema = parse_schema(
+            r#"<xs:complexType name="MixedType" mixed="true">
                 <xs:sequence>
                     <xs:element name="item" type="xs:string"/>
                 </xs:sequence>
-            </xs:complexType>
-        </xs:schema>"#;
+            </xs:complexType>"#,
+        );
 
-        let schema = parse_xsd_ast(xsd.as_bytes()).unwrap();
-        if let XsdTypeDef::Complex(ct) = &schema.types[0] {
-            assert!(ct.mixed);
-        }
+        assert!(complex_type(&schema).mixed);
     }
 
     #[test]
     fn test_parse_complex_type_abstract() {
-        let xsd = r#"<?xml version="1.0" encoding="UTF-8"?>
-        <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
-            <xs:complexType name="AbstractType" abstract="true">
+        let schema = parse_schema(
+            r#"<xs:complexType name="AbstractType" abstract="true">
                 <xs:sequence/>
-            </xs:complexType>
-        </xs:schema>"#;
+            </xs:complexType>"#,
+        );
 
-        let schema = parse_xsd_ast(xsd.as_bytes()).unwrap();
-        if let XsdTypeDef::Complex(ct) = &schema.types[0] {
-            assert!(ct.is_abstract);
-        }
+        assert!(complex_type(&schema).is_abstract);
     }
 
     // =============================================================================
@@ -393,126 +424,97 @@ mod tests {
 
     #[test]
     fn test_parse_simple_type_restriction() {
-        let xsd = r#"<?xml version="1.0" encoding="UTF-8"?>
-        <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
-            <xs:simpleType name="StatusType">
+        let schema = parse_schema(
+            r#"<xs:simpleType name="StatusType">
                 <xs:restriction base="xs:string">
                     <xs:enumeration value="active"/>
                     <xs:enumeration value="inactive"/>
                     <xs:enumeration value="pending"/>
                 </xs:restriction>
-            </xs:simpleType>
-        </xs:schema>"#;
+            </xs:simpleType>"#,
+        );
 
-        let schema = parse_xsd_ast(xsd.as_bytes()).unwrap();
         assert_eq!(schema.types.len(), 1);
-
-        if let XsdTypeDef::Simple(st) = &schema.types[0] {
-            assert_eq!(st.name, Some("StatusType".to_string()));
-            if let XsdSimpleTypeContent::Restriction(r) = &st.content {
-                assert_eq!(r.facets.len(), 3);
-                assert!(matches!(&r.facets[0], XsdFacet::Enumeration(v) if v == "active"));
-            } else {
-                panic!("Expected restriction");
-            }
-        } else {
-            panic!("Expected simple type");
-        }
+        let simple_type = simple_type(&schema);
+        assert_eq!(simple_type.name.as_deref(), Some("StatusType"));
+        let restriction = restriction(simple_type);
+        assert_eq!(restriction.facets.len(), 3);
+        assert!(matches!(&restriction.facets[0], XsdFacet::Enumeration(v) if v == "active"));
     }
 
     #[test]
     fn test_parse_simple_type_pattern() {
-        let xsd = r#"<?xml version="1.0" encoding="UTF-8"?>
-        <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
-            <xs:simpleType name="PhoneType">
+        let schema = parse_schema(
+            r#"<xs:simpleType name="PhoneType">
                 <xs:restriction base="xs:string">
                     <xs:pattern value="[0-9]{3}-[0-9]{4}"/>
                 </xs:restriction>
-            </xs:simpleType>
-        </xs:schema>"#;
+            </xs:simpleType>"#,
+        );
 
-        let schema = parse_xsd_ast(xsd.as_bytes()).unwrap();
-        if let XsdTypeDef::Simple(st) = &schema.types[0] {
-            if let XsdSimpleTypeContent::Restriction(r) = &st.content {
-                assert!(matches!(&r.facets[0], XsdFacet::Pattern(p) if p == "[0-9]{3}-[0-9]{4}"));
-            }
-        }
+        assert!(matches!(
+            &restriction(simple_type(&schema)).facets[0],
+            XsdFacet::Pattern(pattern) if pattern == "[0-9]{3}-[0-9]{4}"
+        ));
     }
 
     #[test]
     fn test_parse_simple_type_length_facets() {
-        let xsd = r#"<?xml version="1.0" encoding="UTF-8"?>
-        <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
-            <xs:simpleType name="BoundedString">
+        let schema = parse_schema(
+            r#"<xs:simpleType name="BoundedString">
                 <xs:restriction base="xs:string">
                     <xs:minLength value="1"/>
                     <xs:maxLength value="100"/>
                 </xs:restriction>
-            </xs:simpleType>
-        </xs:schema>"#;
+            </xs:simpleType>"#,
+        );
 
-        let schema = parse_xsd_ast(xsd.as_bytes()).unwrap();
-        if let XsdTypeDef::Simple(st) = &schema.types[0] {
-            if let XsdSimpleTypeContent::Restriction(r) = &st.content {
-                assert_eq!(r.facets.len(), 2);
-                assert!(matches!(&r.facets[0], XsdFacet::MinLength(1)));
-                assert!(matches!(&r.facets[1], XsdFacet::MaxLength(100)));
-            }
-        }
+        let restriction = restriction(simple_type(&schema));
+        assert_eq!(restriction.facets.len(), 2);
+        assert!(matches!(&restriction.facets[0], XsdFacet::MinLength(1)));
+        assert!(matches!(&restriction.facets[1], XsdFacet::MaxLength(100)));
     }
 
     #[test]
     fn test_parse_simple_type_numeric_facets() {
-        let xsd = r#"<?xml version="1.0" encoding="UTF-8"?>
-        <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
-            <xs:simpleType name="RangedNumber">
+        let schema = parse_schema(
+            r#"<xs:simpleType name="RangedNumber">
                 <xs:restriction base="xs:integer">
                     <xs:minInclusive value="0"/>
                     <xs:maxInclusive value="100"/>
                 </xs:restriction>
-            </xs:simpleType>
-        </xs:schema>"#;
+            </xs:simpleType>"#,
+        );
 
-        let schema = parse_xsd_ast(xsd.as_bytes()).unwrap();
-        if let XsdTypeDef::Simple(st) = &schema.types[0] {
-            if let XsdSimpleTypeContent::Restriction(r) = &st.content {
-                assert_eq!(r.facets.len(), 2);
-            }
-        }
+        assert_eq!(restriction(simple_type(&schema)).facets.len(), 2);
     }
 
     #[test]
     fn test_parse_simple_type_list() {
-        let xsd = r#"<?xml version="1.0" encoding="UTF-8"?>
-        <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
-            <xs:simpleType name="IntList">
+        let schema = parse_schema(
+            r#"<xs:simpleType name="IntList">
                 <xs:list itemType="xs:integer"/>
-            </xs:simpleType>
-        </xs:schema>"#;
+            </xs:simpleType>"#,
+        );
 
-        let schema = parse_xsd_ast(xsd.as_bytes()).unwrap();
-        if let XsdTypeDef::Simple(st) = &schema.types[0] {
-            assert!(matches!(&st.content, XsdSimpleTypeContent::List(_)));
-        }
+        assert!(matches!(
+            &simple_type(&schema).content,
+            XsdSimpleTypeContent::List(_)
+        ));
     }
 
     #[test]
     fn test_parse_simple_type_union() {
-        let xsd = r#"<?xml version="1.0" encoding="UTF-8"?>
-        <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
-            <xs:simpleType name="StringOrInt">
+        let schema = parse_schema(
+            r#"<xs:simpleType name="StringOrInt">
                 <xs:union memberTypes="xs:string xs:integer"/>
-            </xs:simpleType>
-        </xs:schema>"#;
+            </xs:simpleType>"#,
+        );
 
-        let schema = parse_xsd_ast(xsd.as_bytes()).unwrap();
-        if let XsdTypeDef::Simple(st) = &schema.types[0] {
-            if let XsdSimpleTypeContent::Union(u) = &st.content {
-                assert_eq!(u.member_types.len(), 2);
-            } else {
-                panic!("Expected union");
-            }
-        }
+        let XsdSimpleTypeContent::Union(union) = &simple_type(&schema).content else {
+            panic!("Expected union");
+        };
+        assert_eq!(union.member_types.len(), 2);
     }
 
     // =============================================================================
@@ -521,13 +523,10 @@ mod tests {
 
     #[test]
     fn test_parse_import() {
-        let xsd = r#"<?xml version="1.0" encoding="UTF-8"?>
-        <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
-            <xs:import namespace="http://www.opengis.net/gml/3.2"
-                       schemaLocation="http://schemas.opengis.net/gml/3.2.1/gml.xsd"/>
-        </xs:schema>"#;
-
-        let schema = parse_xsd_ast(xsd.as_bytes()).unwrap();
+        let schema = parse_schema(
+            r#"<xs:import namespace="http://www.opengis.net/gml/3.2"
+                schemaLocation="http://schemas.opengis.net/gml/3.2.1/gml.xsd"/>"#,
+        );
         assert_eq!(schema.imports.len(), 1);
         assert_eq!(
             schema.imports[0].namespace,
@@ -541,12 +540,7 @@ mod tests {
 
     #[test]
     fn test_parse_include() {
-        let xsd = r#"<?xml version="1.0" encoding="UTF-8"?>
-        <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
-            <xs:include schemaLocation="types.xsd"/>
-        </xs:schema>"#;
-
-        let schema = parse_xsd_ast(xsd.as_bytes()).unwrap();
+        let schema = parse_schema(r#"<xs:include schemaLocation="types.xsd"/>"#);
         assert_eq!(schema.includes.len(), 1);
         assert_eq!(schema.includes[0].schema_location, "types.xsd");
     }
@@ -557,9 +551,8 @@ mod tests {
 
     #[test]
     fn test_parse_extension() {
-        let xsd = r#"<?xml version="1.0" encoding="UTF-8"?>
-        <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
-            <xs:complexType name="ExtendedType">
+        let schema = parse_schema(
+            r#"<xs:complexType name="ExtendedType">
                 <xs:complexContent>
                     <xs:extension base="BaseType">
                         <xs:sequence>
@@ -567,33 +560,24 @@ mod tests {
                         </xs:sequence>
                     </xs:extension>
                 </xs:complexContent>
-            </xs:complexType>
-        </xs:schema>"#;
-
-        let schema = parse_xsd_ast(xsd.as_bytes()).unwrap();
+            </xs:complexType>"#,
+        );
         assert_eq!(schema.types.len(), 1);
 
-        if let XsdTypeDef::Complex(ct) = &schema.types[0] {
-            if let XsdComplexContent::ComplexContent(cc) = &ct.content {
-                if let XsdComplexContentDerivation::Extension(ext) = &cc.derivation {
-                    assert_eq!(ext.base.local, "BaseType");
-                    assert!(ext.particle.is_some());
-                } else {
-                    panic!("Expected extension");
-                }
-            } else {
-                panic!("Expected complex content");
-            }
-        } else {
-            panic!("Expected complex type");
-        }
+        let XsdComplexContent::ComplexContent(content) = &complex_type(&schema).content else {
+            panic!("Expected complex content");
+        };
+        let XsdComplexContentDerivation::Extension(extension) = &content.derivation else {
+            panic!("Expected extension");
+        };
+        assert_eq!(extension.base.local, "BaseType");
+        assert!(extension.particle.is_some());
     }
 
     #[test]
     fn test_parse_complex_content_restriction() {
-        let xsd = r#"<?xml version="1.0" encoding="UTF-8"?>
-        <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
-            <xs:complexType name="RestrictedType">
+        let schema = parse_schema(
+            r#"<xs:complexType name="RestrictedType">
                 <xs:complexContent>
                     <xs:restriction base="BaseType">
                         <xs:sequence>
@@ -601,42 +585,38 @@ mod tests {
                         </xs:sequence>
                     </xs:restriction>
                 </xs:complexContent>
-            </xs:complexType>
-        </xs:schema>"#;
+            </xs:complexType>"#,
+        );
 
-        let schema = parse_xsd_ast(xsd.as_bytes()).unwrap();
-        if let XsdTypeDef::Complex(ct) = &schema.types[0] {
-            if let XsdComplexContent::ComplexContent(cc) = &ct.content {
-                assert!(matches!(
-                    &cc.derivation,
-                    XsdComplexContentDerivation::Restriction(_)
-                ));
-            }
-        }
+        let XsdComplexContent::ComplexContent(content) = &complex_type(&schema).content else {
+            panic!("Expected complex content");
+        };
+        assert!(matches!(
+            &content.derivation,
+            XsdComplexContentDerivation::Restriction(_)
+        ));
     }
 
     #[test]
     fn test_parse_simple_content_extension() {
-        let xsd = r#"<?xml version="1.0" encoding="UTF-8"?>
-        <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
-            <xs:complexType name="TypeWithAttr">
+        let schema = parse_schema(
+            r#"<xs:complexType name="TypeWithAttr">
                 <xs:simpleContent>
                     <xs:extension base="xs:string">
                         <xs:attribute name="lang" type="xs:string"/>
                     </xs:extension>
                 </xs:simpleContent>
-            </xs:complexType>
-        </xs:schema>"#;
+            </xs:complexType>"#,
+        );
 
-        let schema = parse_xsd_ast(xsd.as_bytes()).unwrap();
-        if let XsdTypeDef::Complex(ct) = &schema.types[0] {
-            if let XsdComplexContent::SimpleContent(sc) = &ct.content {
-                if let XsdSimpleContentDerivation::Extension(ext) = &sc.derivation {
-                    assert_eq!(ext.base.local, "string");
-                    assert_eq!(ext.attributes.len(), 1);
-                }
-            }
-        }
+        let XsdComplexContent::SimpleContent(content) = &complex_type(&schema).content else {
+            panic!("Expected simple content");
+        };
+        let XsdSimpleContentDerivation::Extension(extension) = &content.derivation else {
+            panic!("Expected extension");
+        };
+        assert_eq!(extension.base.local, "string");
+        assert_eq!(extension.attributes.len(), 1);
     }
 
     // =============================================================================
@@ -645,69 +625,59 @@ mod tests {
 
     #[test]
     fn test_parse_element_with_inline_type() {
-        let xsd = r#"<?xml version="1.0" encoding="UTF-8"?>
-        <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
-            <xs:element name="root">
+        let schema = parse_schema(
+            r#"<xs:element name="root">
                 <xs:complexType>
                     <xs:sequence>
                         <xs:element name="child" type="xs:string"/>
                     </xs:sequence>
                 </xs:complexType>
-            </xs:element>
-        </xs:schema>"#;
+            </xs:element>"#,
+        );
 
-        let schema = parse_xsd_ast(xsd.as_bytes()).unwrap();
         assert_eq!(schema.elements.len(), 1);
         assert!(schema.elements[0].inline_type.is_some());
     }
 
     #[test]
     fn test_parse_element_nillable() {
-        let xsd = r#"<?xml version="1.0" encoding="UTF-8"?>
-        <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
-            <xs:element name="nullable" type="xs:string" nillable="true"/>
-        </xs:schema>"#;
-
-        let schema = parse_xsd_ast(xsd.as_bytes()).unwrap();
+        let schema =
+            parse_schema(r#"<xs:element name="nullable" type="xs:string" nillable="true"/>"#);
         assert!(schema.elements[0].nillable);
     }
 
     #[test]
     fn test_parse_element_default_fixed() {
-        let xsd = r#"<?xml version="1.0" encoding="UTF-8"?>
-        <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+        let schema = parse_schema(
+            r#"
             <xs:element name="withDefault" type="xs:string" default="hello"/>
-            <xs:element name="withFixed" type="xs:string" fixed="world"/>
-        </xs:schema>"#;
+            <xs:element name="withFixed" type="xs:string" fixed="world"/>"#,
+        );
 
-        let schema = parse_xsd_ast(xsd.as_bytes()).unwrap();
         assert_eq!(schema.elements[0].default, Some("hello".to_string()));
         assert_eq!(schema.elements[1].fixed, Some("world".to_string()));
     }
 
     #[test]
     fn test_parse_element_occurs() {
-        let xsd = r#"<?xml version="1.0" encoding="UTF-8"?>
-        <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
-            <xs:complexType name="T">
+        let schema = parse_schema(
+            r#"<xs:complexType name="T">
                 <xs:sequence>
                     <xs:element name="optional" type="xs:string" minOccurs="0"/>
                     <xs:element name="many" type="xs:string" maxOccurs="unbounded"/>
                 </xs:sequence>
-            </xs:complexType>
-        </xs:schema>"#;
+            </xs:complexType>"#,
+        );
 
-        let schema = parse_xsd_ast(xsd.as_bytes()).unwrap();
-        if let XsdTypeDef::Complex(ct) = &schema.types[0] {
-            if let XsdComplexContent::Particle(XsdParticle::Sequence(seq)) = &ct.content {
-                if let XsdParticleItem::Element(e) = &seq.particles[0] {
-                    assert_eq!(e.min_occurs, Occurs::Count(0));
-                }
-                if let XsdParticleItem::Element(e) = &seq.particles[1] {
-                    assert_eq!(e.max_occurs, Occurs::Unbounded);
-                }
-            }
-        }
+        let sequence = sequence(complex_type(&schema));
+        let XsdParticleItem::Element(optional) = &sequence.particles[0] else {
+            panic!("Expected optional element");
+        };
+        let XsdParticleItem::Element(many) = &sequence.particles[1] else {
+            panic!("Expected repeated element");
+        };
+        assert_eq!(optional.min_occurs, Occurs::Count(0));
+        assert_eq!(many.max_occurs, Occurs::Unbounded);
     }
 
     // =============================================================================
@@ -716,32 +686,30 @@ mod tests {
 
     #[test]
     fn test_parse_attribute_use_optional() {
-        let xsd = r#"<?xml version="1.0" encoding="UTF-8"?>
-        <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
-            <xs:complexType name="T">
+        let schema = parse_schema(
+            r#"<xs:complexType name="T">
                 <xs:attribute name="opt" type="xs:string" use="optional"/>
-            </xs:complexType>
-        </xs:schema>"#;
+            </xs:complexType>"#,
+        );
 
-        let schema = parse_xsd_ast(xsd.as_bytes()).unwrap();
-        if let XsdTypeDef::Complex(ct) = &schema.types[0] {
-            assert_eq!(ct.attributes[0].use_, AttributeUse::Optional);
-        }
+        assert_eq!(
+            complex_type(&schema).attributes[0].use_,
+            AttributeUse::Optional
+        );
     }
 
     #[test]
     fn test_parse_attribute_use_prohibited() {
-        let xsd = r#"<?xml version="1.0" encoding="UTF-8"?>
-        <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
-            <xs:complexType name="T">
+        let schema = parse_schema(
+            r#"<xs:complexType name="T">
                 <xs:attribute name="removed" type="xs:string" use="prohibited"/>
-            </xs:complexType>
-        </xs:schema>"#;
+            </xs:complexType>"#,
+        );
 
-        let schema = parse_xsd_ast(xsd.as_bytes()).unwrap();
-        if let XsdTypeDef::Complex(ct) = &schema.types[0] {
-            assert_eq!(ct.attributes[0].use_, AttributeUse::Prohibited);
-        }
+        assert_eq!(
+            complex_type(&schema).attributes[0].use_,
+            AttributeUse::Prohibited
+        );
     }
 
     // =============================================================================
@@ -750,32 +718,28 @@ mod tests {
 
     #[test]
     fn test_parse_group_definition() {
-        let xsd = r#"<?xml version="1.0" encoding="UTF-8"?>
-        <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
-            <xs:group name="CommonElements">
+        let schema = parse_schema(
+            r#"<xs:group name="CommonElements">
                 <xs:sequence>
                     <xs:element name="name" type="xs:string"/>
                     <xs:element name="description" type="xs:string"/>
                 </xs:sequence>
-            </xs:group>
-        </xs:schema>"#;
+            </xs:group>"#,
+        );
 
-        let schema = parse_xsd_ast(xsd.as_bytes()).unwrap();
         assert_eq!(schema.groups.len(), 1);
         assert_eq!(schema.groups[0].name, Some("CommonElements".to_string()));
     }
 
     #[test]
     fn test_parse_attribute_group() {
-        let xsd = r#"<?xml version="1.0" encoding="UTF-8"?>
-        <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
-            <xs:attributeGroup name="CommonAttrs">
+        let schema = parse_schema(
+            r#"<xs:attributeGroup name="CommonAttrs">
                 <xs:attribute name="id" type="xs:ID"/>
                 <xs:attribute name="class" type="xs:string"/>
-            </xs:attributeGroup>
-        </xs:schema>"#;
+            </xs:attributeGroup>"#,
+        );
 
-        let schema = parse_xsd_ast(xsd.as_bytes()).unwrap();
         assert_eq!(schema.attribute_groups.len(), 1);
         assert_eq!(
             schema.attribute_groups[0].name,
@@ -790,21 +754,18 @@ mod tests {
 
     #[test]
     fn test_parse_any() {
-        let xsd = r#"<?xml version="1.0" encoding="UTF-8"?>
-        <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
-            <xs:complexType name="OpenType">
+        let schema = parse_schema(
+            r#"<xs:complexType name="OpenType">
                 <xs:sequence>
                     <xs:any processContents="lax" minOccurs="0" maxOccurs="unbounded"/>
                 </xs:sequence>
-            </xs:complexType>
-        </xs:schema>"#;
+            </xs:complexType>"#,
+        );
 
-        let schema = parse_xsd_ast(xsd.as_bytes()).unwrap();
-        if let XsdTypeDef::Complex(ct) = &schema.types[0] {
-            if let XsdComplexContent::Particle(XsdParticle::Sequence(seq)) = &ct.content {
-                assert!(matches!(&seq.particles[0], XsdParticleItem::Any(_)));
-            }
-        }
+        assert!(matches!(
+            &sequence(complex_type(&schema)).particles[0],
+            XsdParticleItem::Any(_)
+        ));
     }
 
     // =============================================================================
@@ -813,16 +774,14 @@ mod tests {
 
     #[test]
     fn test_parse_annotation_skipped() {
-        let xsd = r#"<?xml version="1.0" encoding="UTF-8"?>
-        <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
-            <xs:annotation>
+        let schema = parse_schema(
+            r#"<xs:annotation>
                 <xs:documentation>This is documentation</xs:documentation>
                 <xs:appinfo>Some app info</xs:appinfo>
             </xs:annotation>
-            <xs:element name="root" type="xs:string"/>
-        </xs:schema>"#;
+            <xs:element name="root" type="xs:string"/>"#,
+        );
 
-        let schema = parse_xsd_ast(xsd.as_bytes()).unwrap();
         assert_eq!(schema.elements.len(), 1);
     }
 
@@ -832,26 +791,7 @@ mod tests {
 
     #[test]
     fn test_parse_unique_constraint() {
-        let xsd = r#"<?xml version="1.0" encoding="UTF-8"?>
-        <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
-            <xs:element name="root">
-                <xs:complexType>
-                    <xs:sequence>
-                        <xs:element name="item" maxOccurs="unbounded">
-                            <xs:complexType>
-                                <xs:attribute name="id" type="xs:string"/>
-                            </xs:complexType>
-                        </xs:element>
-                    </xs:sequence>
-                </xs:complexType>
-                <xs:unique name="uniqueId">
-                    <xs:selector xpath="item"/>
-                    <xs:field xpath="@id"/>
-                </xs:unique>
-            </xs:element>
-        </xs:schema>"#;
-
-        let schema = parse_xsd_ast(xsd.as_bytes()).unwrap();
+        let schema = parse_identity_constraint("unique", "uniqueId", None);
         assert_eq!(schema.elements[0].identity_constraints.len(), 1);
         assert_eq!(
             schema.elements[0].identity_constraints[0].constraint_type,
@@ -861,22 +801,7 @@ mod tests {
 
     #[test]
     fn test_parse_key_constraint() {
-        let xsd = r#"<?xml version="1.0" encoding="UTF-8"?>
-        <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
-            <xs:element name="root">
-                <xs:complexType>
-                    <xs:sequence>
-                        <xs:element name="item" maxOccurs="unbounded"/>
-                    </xs:sequence>
-                </xs:complexType>
-                <xs:key name="itemKey">
-                    <xs:selector xpath="item"/>
-                    <xs:field xpath="@id"/>
-                </xs:key>
-            </xs:element>
-        </xs:schema>"#;
-
-        let schema = parse_xsd_ast(xsd.as_bytes()).unwrap();
+        let schema = parse_identity_constraint("key", "itemKey", None);
         assert_eq!(
             schema.elements[0].identity_constraints[0].constraint_type,
             XsdConstraintType::Key
@@ -885,22 +810,7 @@ mod tests {
 
     #[test]
     fn test_parse_keyref_constraint() {
-        let xsd = r#"<?xml version="1.0" encoding="UTF-8"?>
-        <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
-            <xs:element name="root">
-                <xs:complexType>
-                    <xs:sequence>
-                        <xs:element name="ref" maxOccurs="unbounded"/>
-                    </xs:sequence>
-                </xs:complexType>
-                <xs:keyref name="itemRef" refer="itemKey">
-                    <xs:selector xpath="ref"/>
-                    <xs:field xpath="@refId"/>
-                </xs:keyref>
-            </xs:element>
-        </xs:schema>"#;
-
-        let schema = parse_xsd_ast(xsd.as_bytes()).unwrap();
+        let schema = parse_identity_constraint("keyref", "itemRef", Some("itemKey"));
         assert_eq!(
             schema.elements[0].identity_constraints[0].constraint_type,
             XsdConstraintType::KeyRef

@@ -46,6 +46,36 @@ use crate::xpath::error::XPathEvalError;
 
 use super::types::{EvaluationContext, XPathValue};
 
+#[cfg(test)]
+mod test_support {
+    use crate::document::XmlDocument;
+    use crate::error::Result;
+    use crate::namespace::NamespaceResolver;
+    use crate::node::XmlNode;
+
+    use super::{EvaluationContext, XPathValue, evaluate_function};
+
+    pub(super) fn create_test_document() -> XmlDocument {
+        crate::parse(
+            "<root><item id=\"1\">10</item><item id=\"2\">20</item><item id=\"3\">30</item></root>",
+        )
+        .unwrap()
+    }
+
+    pub(super) fn create_context<'a>(
+        doc: &'a XmlDocument,
+        node: &XmlNode,
+    ) -> EvaluationContext<'a> {
+        EvaluationContext::new(node.clone(), doc, NamespaceResolver::new())
+    }
+
+    pub(super) fn evaluate(name: &str, args: Vec<XPathValue>) -> Result<XPathValue> {
+        let doc = create_test_document();
+        let root = doc.get_root_element().unwrap();
+        evaluate_function(name, args, &create_context(&doc, &root))
+    }
+}
+
 // Re-export for tests
 pub use boolean::{fn_boolean, fn_false, fn_lang, fn_not, fn_true};
 pub use helpers::{fn_text, get_first_node_or_context};
@@ -113,107 +143,9 @@ pub fn evaluate_function(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::document::XmlDocument;
-    use crate::namespace::NamespaceResolver;
-
-    fn create_test_document() -> XmlDocument {
-        crate::parse(
-            "<root><item id=\"1\">10</item><item id=\"2\">20</item><item id=\"3\">30</item></root>",
-        )
-        .unwrap()
-    }
-
-    fn create_context<'a>(
-        doc: &'a XmlDocument,
-        node: &crate::node::XmlNode,
-    ) -> EvaluationContext<'a> {
-        EvaluationContext::new(node.clone(), doc, NamespaceResolver::new())
-    }
 
     #[test]
     fn test_unknown_function() {
-        let doc = create_test_document();
-        let root = doc.get_root_element().unwrap();
-        let ctx = create_context(&doc, &root);
-
-        let result = evaluate_function("unknown-function", vec![], &ctx);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_substring() {
-        // Test basic substring
-        assert_eq!(extract_substring("12345", 2.0, None), "2345");
-        assert_eq!(extract_substring("12345", 2.0, Some(3.0)), "234");
-        assert_eq!(extract_substring("12345", 0.0, Some(3.0)), "12");
-        assert_eq!(extract_substring("12345", -1.0, Some(5.0)), "123");
-    }
-
-    fn extract_substring(s: &str, start: f64, len: Option<f64>) -> String {
-        let chars: Vec<char> = s.chars().collect();
-        let start_idx = (start.round() as i64 - 1).max(0) as usize;
-
-        if let Some(length) = len {
-            if length.is_nan() || length <= 0.0 {
-                return String::new();
-            }
-            let actual_start = (start.round() as i64 - 1).max(0) as usize;
-            let end_idx = ((start.round() + length.round()) as i64 - 1).max(0) as usize;
-            let actual_len = end_idx.saturating_sub(actual_start);
-            chars.iter().skip(actual_start).take(actual_len).collect()
-        } else {
-            chars.iter().skip(start_idx).collect()
-        }
-    }
-
-    #[test]
-    fn test_normalize_space_helper() {
-        let normalize = |s: &str| -> String { s.split_whitespace().collect::<Vec<_>>().join(" ") };
-
-        assert_eq!(normalize("  hello   world  "), "hello world");
-        assert_eq!(normalize("no\textra\nspace"), "no extra space");
-        assert_eq!(normalize("   "), "");
-    }
-
-    #[test]
-    fn test_translate_helper() {
-        let translate = |s: &str, from: &str, to: &str| -> String {
-            let from_chars: Vec<char> = from.chars().collect();
-            let to_chars: Vec<char> = to.chars().collect();
-
-            s.chars()
-                .filter_map(|c| {
-                    if let Some(idx) = from_chars.iter().position(|&fc| fc == c) {
-                        if idx < to_chars.len() {
-                            Some(to_chars[idx])
-                        } else {
-                            None
-                        }
-                    } else {
-                        Some(c)
-                    }
-                })
-                .collect()
-        };
-
-        assert_eq!(translate("bar", "abc", "ABC"), "BAr");
-        assert_eq!(translate("--aaa--", "abc-", "ABC"), "AAA");
-    }
-
-    #[test]
-    fn test_round_helper() {
-        // XPath rounding (0.5 rounds up)
-        let xpath_round = |n: f64| -> f64 {
-            if n.is_nan() || n.is_infinite() || n == 0.0 {
-                n
-            } else {
-                (n + 0.5).floor()
-            }
-        };
-
-        assert_eq!(xpath_round(1.5), 2.0);
-        assert_eq!(xpath_round(2.5), 3.0);
-        assert_eq!(xpath_round(-0.5), 0.0);
-        assert_eq!(xpath_round(-1.5), -1.0);
+        assert!(test_support::evaluate("unknown-function", vec![]).is_err());
     }
 }

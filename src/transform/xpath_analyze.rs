@@ -143,7 +143,7 @@ fn analyze_path(path: &PathExpr) -> XPathAnalysis {
         let descendant_or_self =
             step.axis == Axis::DescendantOrSelf && step.node_test == NodeTest::Node;
 
-        if descendant_or_self {
+        let analyzed_step = if descendant_or_self {
             // This is the // shorthand, next step is the actual match
             i += 1;
             if i >= path.steps.len() {
@@ -167,25 +167,20 @@ fn analyze_path(path: &PathExpr) -> XPathAnalysis {
                 ));
             }
 
-            match analyze_step(next_step, true) {
-                Ok((s, pos)) => {
-                    if let Some(p) = pos {
-                        max_position = Some(max_position.map_or(p, |m| m.max(p)));
-                    }
-                    streamable_steps.push(s);
-                }
-                Err(reason) => return XPathAnalysis::NotStreamable(reason),
-            }
+            next_step
         } else {
-            match analyze_step(step, false) {
-                Ok((s, pos)) => {
-                    if let Some(p) = pos {
-                        max_position = Some(max_position.map_or(p, |m| m.max(p)));
-                    }
-                    streamable_steps.push(s);
+            step
+        };
+
+        match analyze_step(analyzed_step, descendant_or_self) {
+            Ok((streamable, position)) => {
+                if let Some(position) = position {
+                    max_position =
+                        Some(max_position.map_or(position, |maximum| maximum.max(position)));
                 }
-                Err(reason) => return XPathAnalysis::NotStreamable(reason),
+                streamable_steps.push(streamable);
             }
+            Err(reason) => return XPathAnalysis::NotStreamable(reason),
         }
 
         i += 1;

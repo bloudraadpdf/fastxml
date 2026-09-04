@@ -479,12 +479,14 @@ fn load_file(
         }
 
         println!("  Downloading: {}", input);
-        let response = ureq::get(input)
-            .timeout(std::time::Duration::from_secs(60))
+        let mut response = ureq::get(input)
+            .config()
+            .timeout_global(Some(std::time::Duration::from_secs(60)))
+            .build()
             .call()?;
 
         let mut bytes = Vec::new();
-        response.into_reader().read_to_end(&mut bytes)?;
+        response.body_mut().as_reader().read_to_end(&mut bytes)?;
 
         fs::create_dir_all(cache_dir)?;
         let mut file = fs::File::create(&cache_path)?;

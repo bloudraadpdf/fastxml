@@ -2,11 +2,9 @@
 
 use std::sync::Arc;
 
-use crate::schema::types::{
-    ComplexType, ContentModel, ContentModelType, ElementDef, FlattenedChildren, SimpleType, TypeDef,
-};
-use crate::schema::xsd::facets::FacetConstraints;
+use crate::schema::types::{ElementDef, FlattenedChildren, TypeDef};
 
+use super::super::lookup::{flatten_complex_type, inherited_elements};
 use super::OnePassSchemaValidator;
 
 impl OnePassSchemaValidator {
@@ -67,113 +65,18 @@ impl OnePassSchemaValidator {
 
             // Fallback: compute at runtime
             if let Some(TypeDef::Complex(complex)) = self.schema.get_type(type_ref) {
-                return Some(Arc::new(self.compute_flattened_children(complex)));
+                return Some(Arc::new(flatten_complex_type(&self.schema, complex)));
             }
         }
 
         // Fall back to computing from inline type if present
         if let Some(ref inline_type) = elem.inline_type {
             if let TypeDef::Complex(complex) = inline_type {
-                return Some(Arc::new(self.compute_flattened_children(complex)));
+                return Some(Arc::new(flatten_complex_type(&self.schema, complex)));
             }
         }
 
         None
-    }
-
-    /// Computes flattened children for inline types (fallback when not in cache).
-    pub(crate) fn compute_flattened_children(&self, complex: &ComplexType) -> FlattenedChildren {
-        let content_model_type = match &complex.content {
-            ContentModel::Sequence(_) => ContentModelType::Sequence,
-            ContentModel::Choice(_) => ContentModelType::Choice,
-            ContentModel::All(_) => ContentModelType::All,
-            ContentModel::ComplexExtension { .. } => ContentModelType::Sequence,
-            ContentModel::Empty => ContentModelType::Empty,
-            ContentModel::SimpleContent { .. } => ContentModelType::Empty,
-            ContentModel::Any { .. } => ContentModelType::Sequence,
-        };
-
-        let mut flattened = FlattenedChildren::with_content_model(content_model_type);
-
-        // Collect elements from content model
-        let mut visited = std::collections::HashSet::new();
-        let elements = self.collect_elements_with_inheritance(complex, &mut visited);
-
-        // Collect ordered elements into a temporary Vec, then convert to Arc<[String]>
-        let mut ordered: Vec<String> = Vec::with_capacity(elements.len());
-        for elem in &elements {
-            flattened
-                .constraints
-                .insert(elem.name.clone(), (elem.min_occurs, elem.max_occurs));
-            // Store element order for sequence validation
-            ordered.push(elem.name.clone());
-        }
-        flattened.ordered_elements = Arc::from(ordered);
-
-        flattened
-    }
-
-    /// Collects all child elements from a complex type, including inherited elements.
-    /// (Used only as fallback for inline types not in cache)
-    pub(crate) fn collect_elements_with_inheritance(
-        &self,
-        complex: &ComplexType,
-        visited: &mut std::collections::HashSet<String>,
-    ) -> Vec<ElementDef> {
-        let mut elements = Vec::new();
-
-        match &complex.content {
-            ContentModel::Sequence(elems)
-            | ContentModel::Choice(elems)
-            | ContentModel::All(elems) => {
-                elements.extend(elems.iter().cloned());
-            }
-            ContentModel::ComplexExtension {
-                base_type,
-                elements: ext_elements,
-            } => {
-                if !visited.contains(base_type.as_str()) {
-                    visited.insert(base_type.clone());
-                    if let Some(TypeDef::Complex(base_complex)) =
-                        self.schema.get_type(base_type.as_str())
-                    {
-                        let base_elements =
-                            self.collect_elements_with_inheritance(base_complex, visited);
-                        elements.extend(base_elements);
-                    }
-                }
-                elements.extend(ext_elements.iter().cloned());
-            }
-            _ => {}
-        }
-
-        elements
-    }
-
-    /// Creates FacetConstraints from a SimpleType definition.
-    pub(crate) fn create_facet_constraints(&self, simple: &SimpleType) -> FacetConstraints {
-        let mut constraints = FacetConstraints::new();
-
-        if let Some(min_len) = simple.min_length {
-            constraints = constraints.with_min_length(min_len as usize);
-        }
-        if let Some(max_len) = simple.max_length {
-            constraints = constraints.with_max_length(max_len as usize);
-        }
-        if let Some(ref min_inc) = simple.min_inclusive {
-            constraints = constraints.with_min_inclusive(min_inc.clone());
-        }
-        if let Some(ref max_inc) = simple.max_inclusive {
-            constraints = constraints.with_max_inclusive(max_inc.clone());
-        }
-        if !simple.enumeration.is_empty() {
-            constraints = constraints.with_enumeration(simple.enumeration.clone());
-        }
-        if let Some(ref pattern) = simple.pattern {
-            constraints = constraints.with_pattern(pattern.clone());
-        }
-
-        constraints
     }
 
     /// Checks if an element is expected by its parent (defined in parent's content model).
@@ -245,7 +148,7 @@ impl OnePassSchemaValidator {
 
         // Collect all elements including inherited ones
         let mut visited = std::collections::HashSet::new();
-        let elements = self.collect_elements_with_inheritance(complex, &mut visited);
+        let elements = inherited_elements(&self.schema, complex, &mut visited);
 
         // Search from the end to prioritize derived type's elements over base type's
         // This is important when an element is redefined in a derived type with a different type
@@ -265,13 +168,13 @@ impl OnePassSchemaValidator {
                     }
                     // Fallback: compute at runtime
                     if let Some(TypeDef::Complex(child_complex)) = self.schema.get_type(tr) {
-                        Some(Arc::new(self.compute_flattened_children(child_complex)))
+                        Some(Arc::new(flatten_complex_type(&self.schema, child_complex)))
                     } else {
                         None
                     }
                 } else if let Some(ref inline) = elem.inline_type {
                     if let TypeDef::Complex(child_complex) = inline {
-                        Some(Arc::new(self.compute_flattened_children(child_complex)))
+                        Some(Arc::new(flatten_complex_type(&self.schema, child_complex)))
                     } else {
                         None
                     }
@@ -318,7 +221,7 @@ impl OnePassSchemaValidator {
 
         // Collect all elements including inherited ones
         let mut visited = std::collections::HashSet::new();
-        let elements = self.collect_elements_with_inheritance(complex, &mut visited);
+        let elements = inherited_elements(&self.schema, complex, &mut visited);
 
         // Search from the end to prioritize derived type's elements over base type's
         for elem in elements.iter().rev() {

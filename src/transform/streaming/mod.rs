@@ -9,6 +9,7 @@ use super::context::TransformContext;
 use super::editable::EditableNode;
 use super::xpath_analyze::StreamableXPath;
 
+pub(crate) use helpers::serialize_editable;
 pub use helpers::{ElementInfo, PathTracker};
 pub use multi::{
     process_for_each_multi, process_for_each_multi_with_context, process_streaming_multi,
@@ -45,17 +46,12 @@ pub type MultiTransformHandlerWithContext<'a> = (
 pub(crate) struct HandlerState<'a> {
     pub(crate) xpath: &'a StreamableXPath,
     pub(crate) builder: Option<super::editable::EditableNodeBuilder>,
-    pub(crate) match_context: Option<TransformContext>,
 }
 
 /// State for tracking a single XPath handler during multi-xpath transform processing.
-/// Includes match_start_offset for zero-copy output.
 pub(crate) struct TransformHandlerState<'a> {
     pub(crate) xpath: &'a StreamableXPath,
     pub(crate) builder: Option<super::editable::EditableNodeBuilder>,
-    pub(crate) match_context: Option<TransformContext>,
-    /// Byte offset where the match started (for zero-copy output).
-    pub(crate) match_start_offset: usize,
 }
 
 #[cfg(test)]

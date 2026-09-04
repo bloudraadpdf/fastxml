@@ -192,7 +192,7 @@ pub fn extract_root_namespaces(xml: &str) -> Result<HashMap<String, String>, cra
                             message: e.to_string(),
                         })
                     })?;
-                    let value = attr.unescape_value().map_err(|e| {
+                    let value = crate::decode_attribute_value(&attr, e.decoder()).map_err(|e| {
                         crate::error::Error::Parse(crate::parser::error::ParseError::Generic {
                             message: e.to_string(),
                         })

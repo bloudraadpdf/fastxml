@@ -12,6 +12,64 @@ pub struct Parser {
     pos: usize,
 }
 
+fn is_function_token(token: &Token) -> bool {
+    matches!(
+        token,
+        Token::NameFn
+            | Token::TextFn
+            | Token::LocalNameFn
+            | Token::NamespaceUriFn
+            | Token::ContainsFn
+            | Token::StartsWithFn
+            | Token::Not
+            | Token::StringFn
+            | Token::ConcatFn
+            | Token::SubstringFn
+            | Token::SubstringBeforeFn
+            | Token::SubstringAfterFn
+            | Token::StringLengthFn
+            | Token::NormalizeSpaceFn
+            | Token::TranslateFn
+            | Token::PositionFn
+            | Token::LastFn
+            | Token::CountFn
+            | Token::IdFn
+            | Token::TrueFn
+            | Token::FalseFn
+            | Token::BooleanFn
+            | Token::LangFn
+            | Token::NumberFn
+            | Token::SumFn
+            | Token::FloorFn
+            | Token::CeilingFn
+            | Token::RoundFn
+    )
+}
+
+fn is_path_token(token: &Token) -> bool {
+    matches!(
+        token,
+        Token::Slash
+            | Token::DoubleSlash
+            | Token::Dot
+            | Token::At
+            | Token::Asterisk
+            | Token::ChildAxis
+            | Token::DescendantAxis
+            | Token::ParentAxis
+            | Token::SelfAxis
+            | Token::DescendantOrSelfAxis
+            | Token::AncestorAxis
+            | Token::AncestorOrSelfAxis
+            | Token::FollowingSiblingAxis
+            | Token::PrecedingSiblingAxis
+            | Token::FollowingAxis
+            | Token::PrecedingAxis
+            | Token::AttributeAxis
+            | Token::NamespaceAxis
+    )
+}
+
 impl Parser {
     /// Creates a new parser from an XPath expression string.
     pub fn new(xpath: &str) -> Result<Self> {
@@ -481,30 +539,8 @@ impl Parser {
 
     /// Parses a multiplicative expression inside predicates: expr ('*' | 'div' | 'mod') expr
     fn parse_predicate_multiplicative_expr(&mut self) -> Result<Expr> {
-        let mut left = self.parse_expr_value()?;
-
-        loop {
-            match self.current() {
-                Token::Asterisk => {
-                    self.advance();
-                    let right = self.parse_expr_value()?;
-                    left = Expr::Multiply(Box::new(left), Box::new(right));
-                }
-                Token::Div => {
-                    self.advance();
-                    let right = self.parse_expr_value()?;
-                    left = Expr::Divide(Box::new(left), Box::new(right));
-                }
-                Token::Mod => {
-                    self.advance();
-                    let right = self.parse_expr_value()?;
-                    left = Expr::Modulo(Box::new(left), Box::new(right));
-                }
-                _ => break,
-            }
-        }
-
-        Ok(left)
+        let left = self.parse_expr_value()?;
+        self.parse_multiplicative_tail(left, Self::parse_expr_value, true)
     }
 
     fn parse_expr_value(&mut self) -> Result<Expr> {
@@ -515,81 +551,78 @@ impl Parser {
             return Ok(Expr::Negate(Box::new(inner)));
         }
 
+        self.parse_atom("expression value")
+    }
+
+    fn parse_atom(&mut self, expected: &str) -> Result<Expr> {
+        if let Some(literal) = self.parse_literal() {
+            return Ok(literal);
+        }
         match self.current() {
-            Token::String(s) => {
-                let s = s.clone();
-                self.advance();
-                Ok(Expr::String(s))
-            }
-            Token::Number(n) => {
-                let n = *n;
-                self.advance();
-                Ok(Expr::Number(n))
-            }
-            // All function tokens
-            Token::NameFn | Token::TextFn | Token::LocalNameFn | Token::NamespaceUriFn |
-            Token::ContainsFn | Token::StartsWithFn | Token::Not |
-            // New functions
-            Token::StringFn | Token::ConcatFn | Token::SubstringFn |
-            Token::SubstringBeforeFn | Token::SubstringAfterFn |
-            Token::StringLengthFn | Token::NormalizeSpaceFn | Token::TranslateFn |
-            Token::PositionFn | Token::LastFn | Token::CountFn | Token::IdFn |
-            Token::TrueFn | Token::FalseFn | Token::BooleanFn | Token::LangFn |
-            Token::NumberFn | Token::SumFn | Token::FloorFn | Token::CeilingFn | Token::RoundFn => {
-                self.parse_function_call()
-            }
-            Token::LeftParen => {
-                self.advance();
-                let inner = self.parse_additive_expr()?;
-                self.expect(&Token::RightParen)?;
-                Ok(inner)
-            }
-            Token::Dollar => {
-                self.advance();
-                // Accept Name tokens and function name keywords as variable names
-                let var_name = self.extract_variable_name()?;
-                Ok(Expr::Variable(var_name))
-            }
+            token if is_function_token(token) => self.parse_function_call(),
+            Token::LeftParen => self.parse_parenthesized(),
+            Token::Dollar => self.parse_variable(),
             Token::Name(name) => {
-                // Check if this is a function call (name followed by '(')
-                if self.peek() == Some(&Token::LeftParen) {
-                    // This is an unknown function call
-                    let fn_name = name.clone();
-                    self.advance(); // consume name
-                    self.advance(); // consume '('
-
-                    let mut args = Vec::new();
-                    if !matches!(self.current(), Token::RightParen) {
-                        args.push(self.parse_expr_value()?);
-                        while matches!(self.current(), Token::Comma) {
-                            self.advance();
-                            args.push(self.parse_expr_value()?);
-                        }
-                    }
-
-                    self.expect(&Token::RightParen)?;
-
-                    Ok(Expr::Function { name: fn_name, args })
-                } else {
-                    let path = self.parse_path_expr()?;
-                    Ok(Expr::Path(path))
-                }
+                let name = name.clone();
+                self.parse_name_or_path(name)
             }
-            Token::Slash | Token::DoubleSlash | Token::Dot | Token::At | Token::Asterisk |
-            // All axis tokens for paths like ancestor::*, preceding-sibling::node(), etc.
-            Token::ChildAxis | Token::DescendantAxis | Token::ParentAxis | Token::SelfAxis |
-            Token::DescendantOrSelfAxis | Token::AncestorAxis | Token::AncestorOrSelfAxis |
-            Token::FollowingSiblingAxis | Token::PrecedingSiblingAxis |
-            Token::FollowingAxis | Token::PrecedingAxis |
-            Token::AttributeAxis | Token::NamespaceAxis => {
-                let path = self.parse_path_expr()?;
-                Ok(Expr::Path(path))
-            }
+            token if is_path_token(token) => self.parse_path_expression(),
             _ => Err(XPathSyntaxError::UnexpectedToken {
                 found: Some(self.current().clone()),
-                expected: "expression value".to_string(),
-            }.into()),
+                expected: expected.to_string(),
+            }
+            .into()),
         }
+    }
+
+    fn parse_literal(&mut self) -> Option<Expr> {
+        let expression = match self.current() {
+            Token::String(value) => Expr::String(value.clone()),
+            Token::Number(value) => Expr::Number(*value),
+            _ => return None,
+        };
+        self.advance();
+        Some(expression)
+    }
+
+    fn parse_parenthesized(&mut self) -> Result<Expr> {
+        self.advance();
+        let inner = self.parse_additive_expr()?;
+        self.expect(&Token::RightParen)?;
+        Ok(inner)
+    }
+
+    fn parse_variable(&mut self) -> Result<Expr> {
+        self.advance();
+        Ok(Expr::Variable(self.extract_variable_name()?))
+    }
+
+    fn parse_name_or_path(&mut self, name: String) -> Result<Expr> {
+        if self.peek() != Some(&Token::LeftParen) {
+            return self.parse_path_expression();
+        }
+
+        self.advance();
+        self.advance();
+        let args = self.parse_function_arguments()?;
+        Ok(Expr::Function { name, args })
+    }
+
+    fn parse_path_expression(&mut self) -> Result<Expr> {
+        Ok(Expr::Path(self.parse_path_expr()?))
+    }
+
+    fn parse_function_arguments(&mut self) -> Result<Vec<Expr>> {
+        let mut args = Vec::new();
+        if !matches!(self.current(), Token::RightParen) {
+            args.push(self.parse_expr_value()?);
+            while matches!(self.current(), Token::Comma) {
+                self.advance();
+                args.push(self.parse_expr_value()?);
+            }
+        }
+        self.expect(&Token::RightParen)?;
+        Ok(args)
     }
 
     /// Parses an additive expression: expr ('+' | '-') expr
@@ -617,20 +650,31 @@ impl Parser {
 
     /// Parses a multiplicative expression: expr ('*' | 'div' | 'mod') expr
     fn parse_multiplicative_expr(&mut self) -> Result<Expr> {
-        let mut left = self.parse_unary_expr()?;
+        let left = self.parse_unary_expr()?;
+        self.parse_multiplicative_tail(left, Self::parse_unary_expr, false)
+    }
 
+    fn parse_multiplicative_tail(
+        &mut self,
+        mut left: Expr,
+        parse_operand: fn(&mut Self) -> Result<Expr>,
+        allow_multiply: bool,
+    ) -> Result<Expr> {
         loop {
             match self.current() {
-                // Note: Asterisk is tricky - could be multiply or node test
-                // In expression context after a value, it's multiply
+                Token::Asterisk if allow_multiply => {
+                    self.advance();
+                    let right = parse_operand(self)?;
+                    left = Expr::Multiply(Box::new(left), Box::new(right));
+                }
                 Token::Div => {
                     self.advance();
-                    let right = self.parse_unary_expr()?;
+                    let right = parse_operand(self)?;
                     left = Expr::Divide(Box::new(left), Box::new(right));
                 }
                 Token::Mod => {
                     self.advance();
-                    let right = self.parse_unary_expr()?;
+                    let right = parse_operand(self)?;
                     left = Expr::Modulo(Box::new(left), Box::new(right));
                 }
                 _ => break,
@@ -695,103 +739,7 @@ impl Parser {
 
     /// Parses a primary expression (path, literal, function, or parenthesized)
     fn parse_primary_expr(&mut self) -> Result<Expr> {
-        match self.current() {
-            Token::String(s) => {
-                let s = s.clone();
-                self.advance();
-                Ok(Expr::String(s))
-            }
-            Token::Number(n) => {
-                let n = *n;
-                self.advance();
-                Ok(Expr::Number(n))
-            }
-            Token::Dollar => {
-                self.advance();
-                // Accept Name tokens and function name keywords as variable names
-                let var_name = self.extract_variable_name()?;
-                Ok(Expr::Variable(var_name))
-            }
-            Token::LeftParen => {
-                self.advance();
-                let inner = self.parse_additive_expr()?;
-                self.expect(&Token::RightParen)?;
-                Ok(inner)
-            }
-            // Function calls
-            Token::NameFn
-            | Token::TextFn
-            | Token::LocalNameFn
-            | Token::NamespaceUriFn
-            | Token::ContainsFn
-            | Token::StartsWithFn
-            | Token::Not
-            | Token::StringFn
-            | Token::ConcatFn
-            | Token::SubstringFn
-            | Token::SubstringBeforeFn
-            | Token::SubstringAfterFn
-            | Token::StringLengthFn
-            | Token::NormalizeSpaceFn
-            | Token::TranslateFn
-            | Token::PositionFn
-            | Token::LastFn
-            | Token::CountFn
-            | Token::IdFn
-            | Token::TrueFn
-            | Token::FalseFn
-            | Token::BooleanFn
-            | Token::LangFn
-            | Token::NumberFn
-            | Token::SumFn
-            | Token::FloorFn
-            | Token::CeilingFn
-            | Token::RoundFn => self.parse_function_call(),
-            // Path expressions or unknown function calls
-            Token::Name(name) => {
-                // Check if this is a function call (name followed by '(')
-                if self.peek() == Some(&Token::LeftParen) {
-                    // This is an unknown function call
-                    let fn_name = name.clone();
-                    self.advance(); // consume name
-                    self.advance(); // consume '('
-
-                    let mut args = Vec::new();
-                    if !matches!(self.current(), Token::RightParen) {
-                        args.push(self.parse_expr_value()?);
-                        while matches!(self.current(), Token::Comma) {
-                            self.advance();
-                            args.push(self.parse_expr_value()?);
-                        }
-                    }
-
-                    self.expect(&Token::RightParen)?;
-
-                    Ok(Expr::Function {
-                        name: fn_name,
-                        args,
-                    })
-                } else {
-                    let path = self.parse_path_expr()?;
-                    Ok(Expr::Path(path))
-                }
-            }
-            Token::Slash | Token::DoubleSlash | Token::Dot | Token::At | Token::Asterisk |
-            // All axis tokens for paths like ancestor::*, preceding-sibling::node(), etc.
-            Token::ChildAxis | Token::DescendantAxis | Token::ParentAxis | Token::SelfAxis |
-            Token::DescendantOrSelfAxis | Token::AncestorAxis | Token::AncestorOrSelfAxis |
-            Token::FollowingSiblingAxis | Token::PrecedingSiblingAxis |
-            Token::FollowingAxis | Token::PrecedingAxis |
-            Token::AttributeAxis | Token::NamespaceAxis => {
-                let path = self.parse_path_expr()?;
-                Ok(Expr::Path(path))
-            }
-            _ => Err(XPathSyntaxError::UnexpectedToken {
-                found: Some(self.current().clone()),
-                expected: "primary expression".to_string(),
-            }
-            .into()),
-        }
+        self.parse_atom("primary expression")
     }
 
     fn parse_function_call(&mut self) -> Result<Expr> {
@@ -844,18 +792,7 @@ impl Parser {
         self.advance();
 
         self.expect(&Token::LeftParen)?;
-
-        let mut args = Vec::new();
-        if !matches!(self.current(), Token::RightParen) {
-            args.push(self.parse_expr_value()?);
-            while matches!(self.current(), Token::Comma) {
-                self.advance();
-                args.push(self.parse_expr_value()?);
-            }
-        }
-
-        self.expect(&Token::RightParen)?;
-
+        let args = self.parse_function_arguments()?;
         Ok(Expr::Function { name, args })
     }
 }

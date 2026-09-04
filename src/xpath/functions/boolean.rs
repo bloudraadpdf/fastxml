@@ -7,76 +7,39 @@
 //! - `lang(string)` - checks language
 
 use crate::error::Result;
-use crate::xpath::error::XPathEvalError;
 use crate::xpath::types::{EvaluationContext, XPathValue};
+
+use super::helpers::require_arguments;
 
 /// `boolean(object)` - converts the argument to boolean.
 pub fn fn_boolean(args: Vec<XPathValue>, _ctx: &EvaluationContext<'_>) -> Result<XPathValue> {
-    if args.len() != 1 {
-        return Err(XPathEvalError::WrongArgumentCount {
-            function: "boolean".to_string(),
-            expected: "1".to_string(),
-            found: args.len(),
-        }
-        .into());
-    }
-
+    require_arguments(&args, "boolean", 1)?;
     let value = args.into_iter().next().unwrap();
     Ok(XPathValue::Boolean(value.to_boolean()))
 }
 
 /// `not(boolean)` - negates the boolean value.
 pub fn fn_not(args: Vec<XPathValue>, _ctx: &EvaluationContext<'_>) -> Result<XPathValue> {
-    if args.len() != 1 {
-        return Err(XPathEvalError::WrongArgumentCount {
-            function: "not".to_string(),
-            expected: "1".to_string(),
-            found: args.len(),
-        }
-        .into());
-    }
-
+    require_arguments(&args, "not", 1)?;
     let value = args.into_iter().next().unwrap();
     Ok(XPathValue::Boolean(!value.to_boolean()))
 }
 
 /// `true()` - returns true.
 pub fn fn_true(args: Vec<XPathValue>, _ctx: &EvaluationContext<'_>) -> Result<XPathValue> {
-    if !args.is_empty() {
-        return Err(XPathEvalError::WrongArgumentCount {
-            function: "true".to_string(),
-            expected: "0".to_string(),
-            found: args.len(),
-        }
-        .into());
-    }
+    require_arguments(&args, "true", 0)?;
     Ok(XPathValue::Boolean(true))
 }
 
 /// `false()` - returns false.
 pub fn fn_false(args: Vec<XPathValue>, _ctx: &EvaluationContext<'_>) -> Result<XPathValue> {
-    if !args.is_empty() {
-        return Err(XPathEvalError::WrongArgumentCount {
-            function: "false".to_string(),
-            expected: "0".to_string(),
-            found: args.len(),
-        }
-        .into());
-    }
+    require_arguments(&args, "false", 0)?;
     Ok(XPathValue::Boolean(false))
 }
 
 /// `lang(string)` - checks if the context node's language matches.
 pub fn fn_lang(args: Vec<XPathValue>, ctx: &EvaluationContext<'_>) -> Result<XPathValue> {
-    if args.len() != 1 {
-        return Err(XPathEvalError::WrongArgumentCount {
-            function: "lang".to_string(),
-            expected: "1".to_string(),
-            found: args.len(),
-        }
-        .into());
-    }
-
+    require_arguments(&args, "lang", 1)?;
     let lang_arg = args
         .into_iter()
         .next()
@@ -104,197 +67,112 @@ pub fn fn_lang(args: Vec<XPathValue>, ctx: &EvaluationContext<'_>) -> Result<XPa
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::document::XmlDocument;
-    use crate::namespace::NamespaceResolver;
     use crate::xpath::functions::evaluate_function;
+    use crate::xpath::functions::test_support::{create_context, evaluate};
 
-    fn create_test_document() -> XmlDocument {
-        crate::parse(
-            "<root><item id=\"1\">10</item><item id=\"2\">20</item><item id=\"3\">30</item></root>",
-        )
-        .unwrap()
+    fn assert_boolean(name: &str, args: Vec<XPathValue>, expected: bool) {
+        assert_eq!(evaluate(name, args).unwrap().to_boolean(), expected);
     }
 
-    fn create_context<'a>(
-        doc: &'a XmlDocument,
-        node: &crate::node::XmlNode,
-    ) -> EvaluationContext<'a> {
-        EvaluationContext::new(node.clone(), doc, NamespaceResolver::new())
+    fn assert_wrong_args(name: &str, args: Vec<XPathValue>) {
+        assert!(evaluate(name, args).is_err());
+    }
+
+    fn assert_lang(xml: &str, expected: bool) {
+        let doc = crate::parse(xml).unwrap();
+        let root = doc.get_root_element().unwrap();
+        let child = root.get_child_nodes().into_iter().next().unwrap();
+        let result = evaluate_function(
+            "lang",
+            vec![XPathValue::String("en".to_string())],
+            &create_context(&doc, &child),
+        )
+        .unwrap();
+        assert_eq!(result.to_boolean(), expected);
     }
 
     #[test]
     fn test_fn_boolean_true_string() {
-        let doc = create_test_document();
-        let root = doc.get_root_element().unwrap();
-        let ctx = create_context(&doc, &root);
-
-        let result = evaluate_function(
+        assert_boolean(
             "boolean",
             vec![XPathValue::String("hello".to_string())],
-            &ctx,
-        )
-        .unwrap();
-        assert!(result.to_boolean());
+            true,
+        );
     }
 
     #[test]
     fn test_fn_boolean_false_empty_string() {
-        let doc = create_test_document();
-        let root = doc.get_root_element().unwrap();
-        let ctx = create_context(&doc, &root);
-
-        let result =
-            evaluate_function("boolean", vec![XPathValue::String("".to_string())], &ctx).unwrap();
-        assert!(!result.to_boolean());
+        assert_boolean("boolean", vec![XPathValue::String("".to_string())], false);
     }
 
     #[test]
     fn test_fn_boolean_number() {
-        let doc = create_test_document();
-        let root = doc.get_root_element().unwrap();
-        let ctx = create_context(&doc, &root);
-
-        let result = evaluate_function("boolean", vec![XPathValue::Number(1.0)], &ctx).unwrap();
-        assert!(result.to_boolean());
-
-        let result = evaluate_function("boolean", vec![XPathValue::Number(0.0)], &ctx).unwrap();
-        assert!(!result.to_boolean());
+        assert_boolean("boolean", vec![XPathValue::Number(1.0)], true);
+        assert_boolean("boolean", vec![XPathValue::Number(0.0)], false);
     }
 
     #[test]
     fn test_fn_boolean_wrong_args() {
-        let doc = create_test_document();
-        let root = doc.get_root_element().unwrap();
-        let ctx = create_context(&doc, &root);
-
-        let result = evaluate_function("boolean", vec![], &ctx);
-        assert!(result.is_err());
+        assert_wrong_args("boolean", vec![]);
     }
 
     #[test]
     fn test_fn_not_true() {
-        let doc = create_test_document();
-        let root = doc.get_root_element().unwrap();
-        let ctx = create_context(&doc, &root);
-
-        let result = evaluate_function("not", vec![XPathValue::Boolean(false)], &ctx).unwrap();
-        assert!(result.to_boolean());
+        assert_boolean("not", vec![XPathValue::Boolean(false)], true);
     }
 
     #[test]
     fn test_fn_not_false() {
-        let doc = create_test_document();
-        let root = doc.get_root_element().unwrap();
-        let ctx = create_context(&doc, &root);
-
-        let result = evaluate_function("not", vec![XPathValue::Boolean(true)], &ctx).unwrap();
-        assert!(!result.to_boolean());
+        assert_boolean("not", vec![XPathValue::Boolean(true)], false);
     }
 
     #[test]
     fn test_fn_not_wrong_args() {
-        let doc = create_test_document();
-        let root = doc.get_root_element().unwrap();
-        let ctx = create_context(&doc, &root);
-
-        let result = evaluate_function("not", vec![], &ctx);
-        assert!(result.is_err());
+        assert_wrong_args("not", vec![]);
     }
 
     #[test]
     fn test_fn_true() {
-        let doc = create_test_document();
-        let root = doc.get_root_element().unwrap();
-        let ctx = create_context(&doc, &root);
-
-        let result = evaluate_function("true", vec![], &ctx).unwrap();
-        assert!(result.to_boolean());
+        assert_boolean("true", vec![], true);
     }
 
     #[test]
     fn test_fn_true_wrong_args() {
-        let doc = create_test_document();
-        let root = doc.get_root_element().unwrap();
-        let ctx = create_context(&doc, &root);
-
-        let result = evaluate_function("true", vec![XPathValue::Boolean(false)], &ctx);
-        assert!(result.is_err());
+        assert_wrong_args("true", vec![XPathValue::Boolean(false)]);
     }
 
     #[test]
     fn test_fn_false() {
-        let doc = create_test_document();
-        let root = doc.get_root_element().unwrap();
-        let ctx = create_context(&doc, &root);
-
-        let result = evaluate_function("false", vec![], &ctx).unwrap();
-        assert!(!result.to_boolean());
+        assert_boolean("false", vec![], false);
     }
 
     #[test]
     fn test_fn_false_wrong_args() {
-        let doc = create_test_document();
-        let root = doc.get_root_element().unwrap();
-        let ctx = create_context(&doc, &root);
-
-        let result = evaluate_function("false", vec![XPathValue::Boolean(true)], &ctx);
-        assert!(result.is_err());
+        assert_wrong_args("false", vec![XPathValue::Boolean(true)]);
     }
 
     #[test]
     fn test_fn_lang_match() {
-        let doc = crate::parse("<root xml:lang=\"en\"><child/></root>").unwrap();
-        let root = doc.get_root_element().unwrap();
-        let child = root.get_child_nodes().into_iter().next().unwrap();
-        let ctx = create_context(&doc, &child);
-
-        let result =
-            evaluate_function("lang", vec![XPathValue::String("en".to_string())], &ctx).unwrap();
-        assert!(result.to_boolean());
+        assert_lang("<root xml:lang=\"en\"><child/></root>", true);
     }
 
     #[test]
     fn test_fn_lang_sublanguage() {
-        let doc = crate::parse("<root xml:lang=\"en-US\"><child/></root>").unwrap();
-        let root = doc.get_root_element().unwrap();
-        let child = root.get_child_nodes().into_iter().next().unwrap();
-        let ctx = create_context(&doc, &child);
-
-        let result =
-            evaluate_function("lang", vec![XPathValue::String("en".to_string())], &ctx).unwrap();
-        assert!(result.to_boolean());
+        assert_lang("<root xml:lang=\"en-US\"><child/></root>", true);
     }
 
     #[test]
     fn test_fn_lang_no_match() {
-        let doc = crate::parse("<root xml:lang=\"fr\"><child/></root>").unwrap();
-        let root = doc.get_root_element().unwrap();
-        let child = root.get_child_nodes().into_iter().next().unwrap();
-        let ctx = create_context(&doc, &child);
-
-        let result =
-            evaluate_function("lang", vec![XPathValue::String("en".to_string())], &ctx).unwrap();
-        assert!(!result.to_boolean());
+        assert_lang("<root xml:lang=\"fr\"><child/></root>", false);
     }
 
     #[test]
     fn test_fn_lang_no_attribute() {
-        let doc = crate::parse("<root><child/></root>").unwrap();
-        let root = doc.get_root_element().unwrap();
-        let ctx = create_context(&doc, &root);
-
-        let result =
-            evaluate_function("lang", vec![XPathValue::String("en".to_string())], &ctx).unwrap();
-        assert!(!result.to_boolean());
+        assert_lang("<root><child/></root>", false);
     }
 
     #[test]
     fn test_fn_lang_wrong_args() {
-        let doc = create_test_document();
-        let root = doc.get_root_element().unwrap();
-        let ctx = create_context(&doc, &root);
-
-        let result = evaluate_function("lang", vec![], &ctx);
-        assert!(result.is_err());
+        assert_wrong_args("lang", vec![]);
     }
 }

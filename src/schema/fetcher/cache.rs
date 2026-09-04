@@ -10,6 +10,86 @@ use crate::error::Result;
 use super::result::FetchResult;
 use super::traits::SchemaFetcher;
 
+struct CacheState<F> {
+    inner: F,
+    entries: DashMap<String, FetchResult>,
+}
+
+impl<F> CacheState<F> {
+    fn new(inner: F) -> Self {
+        Self {
+            inner,
+            entries: DashMap::new(),
+        }
+    }
+
+    fn seed(&self, url: &str, content: Vec<u8>) {
+        self.entries.insert(
+            url.to_string(),
+            FetchResult {
+                content,
+                final_url: url.to_string(),
+                redirected: false,
+            },
+        );
+    }
+
+    fn cached(&self, url: &str) -> Option<FetchResult> {
+        self.entries.get(url).map(|entry| entry.value().clone())
+    }
+
+    fn cached_result(&self, url: &str) -> Option<Result<FetchResult>> {
+        self.cached(url).map(Ok)
+    }
+
+    fn store(&self, url: &str, result: &FetchResult) {
+        self.entries.insert(url.to_string(), result.clone());
+        if result.final_url != url {
+            self.entries
+                .insert(result.final_url.clone(), result.clone());
+        }
+    }
+
+    fn finish_fetch(&self, url: &str, result: FetchResult) -> FetchResult {
+        self.store(url, &result);
+        result
+    }
+}
+
+macro_rules! impl_cache_api {
+    ($(#[$attribute:meta])* $name:ident, $bound:path) => {
+        $(#[$attribute])*
+        impl<F: $bound> $name<F> {
+            /// Creates a caching fetcher around the given inner fetcher.
+            pub fn new(inner: F) -> Self {
+                Self {
+                    state: CacheState::new(inner),
+                }
+            }
+
+            /// Pre-seeds the cache with content for a given URL.
+            pub fn seed(&self, url: &str, content: Vec<u8>) {
+                self.state.seed(url, content);
+            }
+
+            /// Returns the number of cached entries.
+            pub fn len(&self) -> usize {
+                self.state.entries.len()
+            }
+
+            /// Returns `true` if the cache is empty.
+            pub fn is_empty(&self) -> bool {
+                self.state.entries.is_empty()
+            }
+
+            /// Returns a reference to the inner fetcher.
+            pub fn inner(&self) -> &F {
+                &self.state.inner
+            }
+        }
+    };
+}
+
 /// A fetcher wrapper that caches fetch results in memory.
 ///
 /// When a URL is requested:
@@ -29,111 +109,35 @@ use super::traits::SchemaFetcher;
 /// let result = fetcher.fetch("http://example.com/schema.xsd")?;
 /// ```
 pub struct CachingFetcher<F: SchemaFetcher> {
-    inner: F,
-    cache: DashMap<String, FetchResult>,
+    state: CacheState<F>,
 }
 
-impl<F: SchemaFetcher> CachingFetcher<F> {
-    /// Creates a new caching fetcher wrapping the given inner fetcher.
-    pub fn new(inner: F) -> Self {
-        Self {
-            inner,
-            cache: DashMap::new(),
-        }
-    }
-
-    /// Pre-seeds the cache with content for a given URL.
-    pub fn seed(&self, url: &str, content: Vec<u8>) {
-        self.cache.insert(
-            url.to_string(),
-            FetchResult {
-                content,
-                final_url: url.to_string(),
-                redirected: false,
-            },
-        );
-    }
-
-    /// Returns the number of cached entries.
-    pub fn len(&self) -> usize {
-        self.cache.len()
-    }
-
-    /// Returns `true` if the cache is empty.
-    pub fn is_empty(&self) -> bool {
-        self.cache.is_empty()
-    }
-
-    /// Returns a reference to the inner fetcher.
-    pub fn inner(&self) -> &F {
-        &self.inner
-    }
-}
+impl_cache_api!(CachingFetcher, SchemaFetcher);
 
 impl<F: SchemaFetcher> SchemaFetcher for CachingFetcher<F> {
     fn fetch(&self, url: &str) -> Result<FetchResult> {
-        // Check cache
-        if let Some(entry) = self.cache.get(url) {
-            return Ok(entry.value().clone());
+        if let Some(result) = self.state.cached_result(url) {
+            return result;
         }
 
-        // Delegate to inner
-        let result = self.inner.fetch(url)?;
-
-        // Cache under both requested URL and final URL
-        self.cache.insert(url.to_string(), result.clone());
-        if result.final_url != url {
-            self.cache.insert(result.final_url.clone(), result.clone());
-        }
-
-        Ok(result)
+        self.state
+            .inner
+            .fetch(url)
+            .map(|result| self.state.finish_fetch(url, result))
     }
 }
 
 /// Async version of [`CachingFetcher`].
 #[cfg(feature = "tokio")]
 pub struct AsyncCachingFetcher<F: super::traits::AsyncSchemaFetcher> {
-    inner: F,
-    cache: DashMap<String, FetchResult>,
+    state: CacheState<F>,
 }
 
-#[cfg(feature = "tokio")]
-impl<F: super::traits::AsyncSchemaFetcher> AsyncCachingFetcher<F> {
-    /// Creates a new async caching fetcher wrapping the given inner fetcher.
-    pub fn new(inner: F) -> Self {
-        Self {
-            inner,
-            cache: DashMap::new(),
-        }
-    }
-
-    /// Pre-seeds the cache with content for a given URL.
-    pub fn seed(&self, url: &str, content: Vec<u8>) {
-        self.cache.insert(
-            url.to_string(),
-            FetchResult {
-                content,
-                final_url: url.to_string(),
-                redirected: false,
-            },
-        );
-    }
-
-    /// Returns the number of cached entries.
-    pub fn len(&self) -> usize {
-        self.cache.len()
-    }
-
-    /// Returns `true` if the cache is empty.
-    pub fn is_empty(&self) -> bool {
-        self.cache.is_empty()
-    }
-
-    /// Returns a reference to the inner fetcher.
-    pub fn inner(&self) -> &F {
-        &self.inner
-    }
-}
+impl_cache_api!(
+    #[cfg(feature = "tokio")]
+    AsyncCachingFetcher,
+    super::traits::AsyncSchemaFetcher
+);
 
 #[cfg(feature = "tokio")]
 #[async_trait::async_trait]
@@ -141,67 +145,23 @@ impl<F: super::traits::AsyncSchemaFetcher> super::traits::AsyncSchemaFetcher
     for AsyncCachingFetcher<F>
 {
     async fn fetch(&self, url: &str) -> Result<FetchResult> {
-        // Check cache
-        if let Some(entry) = self.cache.get(url) {
-            return Ok(entry.value().clone());
+        if let Some(result) = self.state.cached_result(url) {
+            return result;
         }
 
-        // Delegate to inner
-        let result = self.inner.fetch(url).await?;
-
-        // Cache under both requested URL and final URL
-        self.cache.insert(url.to_string(), result.clone());
-        if result.final_url != url {
-            self.cache.insert(result.final_url.clone(), result.clone());
-        }
-
-        Ok(result)
+        self.state
+            .inner
+            .fetch(url)
+            .await
+            .map(|result| self.state.finish_fetch(url, result))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schema::fetcher::NoopFetcher;
+    use crate::schema::fetcher::{NoopFetcher, test_support::TrackingFetcher};
     use std::collections::HashMap;
-    use std::sync::{Arc, Mutex};
-
-    /// A mock fetcher that tracks fetch calls.
-    struct TrackingFetcher {
-        responses: HashMap<String, Vec<u8>>,
-        calls: Arc<Mutex<Vec<String>>>,
-    }
-
-    impl TrackingFetcher {
-        fn new(responses: HashMap<String, Vec<u8>>) -> Self {
-            Self {
-                responses,
-                calls: Arc::new(Mutex::new(Vec::new())),
-            }
-        }
-
-        fn call_count(&self) -> usize {
-            self.calls.lock().unwrap().len()
-        }
-    }
-
-    impl SchemaFetcher for TrackingFetcher {
-        fn fetch(&self, url: &str) -> Result<FetchResult> {
-            self.calls.lock().unwrap().push(url.to_string());
-            match self.responses.get(url) {
-                Some(content) => Ok(FetchResult {
-                    content: content.clone(),
-                    final_url: url.to_string(),
-                    redirected: false,
-                }),
-                None => Err(crate::schema::fetcher::error::FetchError::RequestFailed {
-                    url: url.to_string(),
-                    message: "Not found".to_string(),
-                }
-                .into()),
-            }
-        }
-    }
 
     #[test]
     fn test_caching_fetcher_caches_result() {

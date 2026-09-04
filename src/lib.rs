@@ -94,6 +94,77 @@
 #![allow(clippy::collapsible_match)]
 #![allow(clippy::large_enum_variant)]
 
+use std::borrow::Cow;
+
+use quick_xml::{XmlVersion, encoding::Decoder, events::attributes::Attribute};
+
+/// Decode and XML-normalise an attribute with the decoder carried by its
+/// reader event. Libraries cannot use quick-xml's UTF-8-only convenience API:
+/// Cargo may unify the `encoding` feature through any downstream dependency.
+pub(crate) fn decode_attribute_value<'a>(
+    attribute: &Attribute<'a>,
+    decoder: Decoder,
+) -> quick_xml::Result<Cow<'a, str>> {
+    attribute.decoded_and_normalized_value(XmlVersion::Implicit1_0, decoder)
+}
+
+/// Decode a text event's content with XML entities resolved. quick-xml 0.41 split
+/// `BytesText::decode` (charset + EOL normalisation only) from entity unescaping, so this
+/// restores the pre-0.41 `BytesText::unescape()` behaviour the crate relied on.
+pub(crate) trait TextContent {
+    /// The charset-decoded, entity-unescaped text (owned).
+    fn text_content(&self)
+    -> std::result::Result<std::borrow::Cow<'static, str>, quick_xml::Error>;
+}
+
+impl TextContent for quick_xml::events::BytesText<'_> {
+    fn text_content(
+        &self,
+    ) -> std::result::Result<std::borrow::Cow<'static, str>, quick_xml::Error> {
+        let decoded = self.decode()?;
+        Ok(std::borrow::Cow::Owned(
+            quick_xml::escape::unescape(&decoded)?.into_owned(),
+        ))
+    }
+}
+
+#[cfg(test)]
+mod attribute_decoding_tests {
+    use quick_xml::{Reader, events::Event};
+
+    use super::decode_attribute_value;
+
+    #[test]
+    fn uses_the_decoder_carried_by_the_reader_event() {
+        let xml =
+            b"<?xml version=\"1.0\" encoding=\"windows-1252\"?><root label=\"caf\xe9 &amp; tea\"/>";
+        let mut reader = Reader::from_reader(xml.as_slice());
+        let mut buffer = Vec::new();
+
+        loop {
+            match reader
+                .read_event_into(&mut buffer)
+                .expect("valid Windows-1252 XML")
+            {
+                Event::Empty(start) => {
+                    let attribute = start
+                        .attributes()
+                        .next()
+                        .expect("label attribute")
+                        .expect("valid label attribute");
+                    let value = decode_attribute_value(&attribute, start.decoder())
+                        .expect("decodable attribute");
+                    assert_eq!(value, "café & tea");
+                    break;
+                }
+                Event::Eof => panic!("missing root element"),
+                _ => {}
+            }
+            buffer.clear();
+        }
+    }
+}
+
 pub mod compat;
 pub mod document;
 pub mod error;

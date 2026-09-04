@@ -70,114 +70,20 @@ pub(crate) struct NodeData {
 }
 
 impl NodeData {
-    /// Creates a new document node.
-    pub fn document() -> Self {
-        Self {
-            id: 0,
-            node_type: NodeType::Document,
-            name: String::new(),
-            prefix: None,
-            namespace_uri: None,
-            content: None,
-            attributes: IndexMap::new(),
-            attribute_ns_info: IndexMap::new(),
-            namespace_decls: Vec::new(),
-            parent: None,
-            children: SmallVec::new(),
-            line: None,
-            column: None,
-        }
-    }
-
-    /// Creates a new element node.
-    pub fn element(
+    fn new(
         id: NodeId,
+        node_type: NodeType,
         name: String,
         prefix: Option<String>,
         namespace_uri: Option<String>,
+        content: Option<String>,
     ) -> Self {
         Self {
             id,
-            node_type: NodeType::Element,
+            node_type,
             name,
             prefix,
             namespace_uri,
-            content: None,
-            attributes: IndexMap::new(),
-            attribute_ns_info: IndexMap::new(),
-            namespace_decls: Vec::new(),
-            parent: None,
-            children: SmallVec::new(),
-            line: None,
-            column: None,
-        }
-    }
-
-    /// Creates a new text node.
-    pub fn text(id: NodeId, content: String) -> Self {
-        Self {
-            id,
-            node_type: NodeType::Text,
-            name: String::new(),
-            prefix: None,
-            namespace_uri: None,
-            content: Some(content),
-            attributes: IndexMap::new(),
-            attribute_ns_info: IndexMap::new(),
-            namespace_decls: Vec::new(),
-            parent: None,
-            children: SmallVec::new(),
-            line: None,
-            column: None,
-        }
-    }
-
-    /// Creates a new CDATA node.
-    pub fn cdata(id: NodeId, content: String) -> Self {
-        Self {
-            id,
-            node_type: NodeType::CData,
-            name: String::new(),
-            prefix: None,
-            namespace_uri: None,
-            content: Some(content),
-            attributes: IndexMap::new(),
-            attribute_ns_info: IndexMap::new(),
-            namespace_decls: Vec::new(),
-            parent: None,
-            children: SmallVec::new(),
-            line: None,
-            column: None,
-        }
-    }
-
-    /// Creates a new comment node.
-    pub fn comment(id: NodeId, content: String) -> Self {
-        Self {
-            id,
-            node_type: NodeType::Comment,
-            name: String::new(),
-            prefix: None,
-            namespace_uri: None,
-            content: Some(content),
-            attributes: IndexMap::new(),
-            attribute_ns_info: IndexMap::new(),
-            namespace_decls: Vec::new(),
-            parent: None,
-            children: SmallVec::new(),
-            line: None,
-            column: None,
-        }
-    }
-
-    /// Creates a new processing instruction node.
-    pub fn processing_instruction(id: NodeId, target: String, content: Option<String>) -> Self {
-        Self {
-            id,
-            node_type: NodeType::ProcessingInstruction,
-            name: target,
-            prefix: None,
-            namespace_uri: None,
             content,
             attributes: IndexMap::new(),
             attribute_ns_info: IndexMap::new(),
@@ -189,6 +95,62 @@ impl NodeData {
         }
     }
 
+    /// Creates a new document node.
+    pub fn document() -> Self {
+        Self::new(0, NodeType::Document, String::new(), None, None, None)
+    }
+
+    /// Creates a new element node.
+    pub fn element(
+        id: NodeId,
+        name: String,
+        prefix: Option<String>,
+        namespace_uri: Option<String>,
+    ) -> Self {
+        Self::new(id, NodeType::Element, name, prefix, namespace_uri, None)
+    }
+
+    /// Creates a new text node.
+    pub fn text(id: NodeId, content: String) -> Self {
+        Self::new(id, NodeType::Text, String::new(), None, None, Some(content))
+    }
+
+    /// Creates a new CDATA node.
+    pub fn cdata(id: NodeId, content: String) -> Self {
+        Self::new(
+            id,
+            NodeType::CData,
+            String::new(),
+            None,
+            None,
+            Some(content),
+        )
+    }
+
+    /// Creates a new comment node.
+    pub fn comment(id: NodeId, content: String) -> Self {
+        Self::new(
+            id,
+            NodeType::Comment,
+            String::new(),
+            None,
+            None,
+            Some(content),
+        )
+    }
+
+    /// Creates a new processing instruction node.
+    pub fn processing_instruction(id: NodeId, target: String, content: Option<String>) -> Self {
+        Self::new(
+            id,
+            NodeType::ProcessingInstruction,
+            target,
+            None,
+            None,
+            content,
+        )
+    }
+
     /// Creates a new attribute node (for XPath evaluation).
     pub fn attribute(
         id: NodeId,
@@ -197,21 +159,14 @@ impl NodeData {
         prefix: Option<String>,
         namespace_uri: Option<String>,
     ) -> Self {
-        Self {
+        Self::new(
             id,
-            node_type: NodeType::Attribute,
+            NodeType::Attribute,
             name,
             prefix,
             namespace_uri,
-            content: Some(value),
-            attributes: IndexMap::new(),
-            attribute_ns_info: IndexMap::new(),
-            namespace_decls: Vec::new(),
-            parent: None,
-            children: SmallVec::new(),
-            line: None,
-            column: None,
-        }
+            Some(value),
+        )
     }
 
     /// Creates a new namespace node (for XPath evaluation).
@@ -220,21 +175,7 @@ impl NodeData {
     /// - name: the namespace prefix (or empty string for default namespace)
     /// - content: the namespace URI
     pub fn namespace_node(id: NodeId, prefix: String, uri: String) -> Self {
-        Self {
-            id,
-            node_type: NodeType::Namespace,
-            name: prefix,
-            prefix: None,
-            namespace_uri: None,
-            content: Some(uri),
-            attributes: IndexMap::new(),
-            attribute_ns_info: IndexMap::new(),
-            namespace_decls: Vec::new(),
-            parent: None,
-            children: SmallVec::new(),
-            line: None,
-            column: None,
-        }
+        Self::new(id, NodeType::Namespace, prefix, None, None, Some(uri))
     }
 
     /// Returns the qualified name (prefix:name or just name).

@@ -69,30 +69,20 @@ pub struct XsdElement {
 impl XsdElement {
     /// Creates a new element with just a name.
     pub fn new(name: impl Into<String>) -> Self {
-        Self {
-            name: name.into(),
-            type_ref: None,
-            inline_type: None,
-            ref_: None,
-            min_occurs: Occurs::Count(1),
-            max_occurs: Occurs::Count(1),
-            is_abstract: false,
-            substitution_group: None,
-            nillable: false,
-            default: None,
-            fixed: None,
-            form: None,
-            identity_constraints: Vec::new(),
-        }
+        Self::with_identity(name.into(), None)
     }
 
     /// Creates an element reference.
     pub fn ref_(ref_name: QName) -> Self {
+        Self::with_identity(String::new(), Some(ref_name))
+    }
+
+    fn with_identity(name: String, ref_: Option<QName>) -> Self {
         Self {
-            name: String::new(),
+            name,
             type_ref: None,
             inline_type: None,
-            ref_: Some(ref_name),
+            ref_,
             min_occurs: Occurs::Count(1),
             max_occurs: Occurs::Count(1),
             is_abstract: false,

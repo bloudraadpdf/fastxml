@@ -351,8 +351,7 @@ pub(crate) fn extract_element_info(
     let mut attributes = HashMap::new();
     for attr in e.attributes().filter_map(|a| a.ok()) {
         let key = std::str::from_utf8(attr.key.as_ref()).map_err(TransformError::Utf8)?;
-        let value = attr
-            .unescape_value()
+        let value = crate::decode_attribute_value(&attr, e.decoder())
             .map_err(|err| TransformError::XmlParse(err.to_string()))?;
         attributes.insert(key.to_string(), value.to_string());
     }
@@ -387,8 +386,7 @@ pub(crate) fn add_start_to_builder(
 
     for attr in e.attributes().filter_map(|a| a.ok()) {
         let key = std::str::from_utf8(attr.key.as_ref()).map_err(TransformError::Utf8)?;
-        let value = attr
-            .unescape_value()
+        let value = crate::decode_attribute_value(&attr, e.decoder())
             .map_err(|err| TransformError::XmlParse(err.to_string()))?;
 
         if let Some(ns_prefix) = key.strip_prefix("xmlns:") {

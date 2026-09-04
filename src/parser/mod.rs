@@ -5,6 +5,7 @@ mod unified;
 
 pub use unified::Parser;
 
+use crate::TextContent;
 use std::collections::HashMap;
 use std::io::BufRead;
 
@@ -146,6 +147,41 @@ fn configure_reader<R: BufRead>(reader: &mut Reader<R>, options: &ParserOptions)
     reader.config_mut().check_comments = options.check_comments;
 }
 
+/// Flush buffered text (accumulated across quick-xml 0.41 `Text` + `GeneralRef` events) as a
+/// single text node, preserving the pre-0.41 one-node-per-text-run shape.
+fn flush_text(
+    pending: &mut String,
+    builder: &mut DocumentBuilder,
+    options: &ParserOptions,
+    memory_used: &mut usize,
+) -> Result<()> {
+    if !pending.is_empty() {
+        check_memory(options, memory_used, pending.len())?;
+        builder.text(pending.as_str());
+        pending.clear();
+    }
+    Ok(())
+}
+
+fn process_element_event<R: BufRead>(
+    element: &quick_xml::events::BytesStart<'_>,
+    reader: &Reader<PositionTrackingReader<R>>,
+    builder: &mut DocumentBuilder,
+    namespaces: &mut NamespaceStack,
+    options: &ParserOptions,
+    memory_used: &mut usize,
+) -> Result<()> {
+    check_memory(options, memory_used, element.len())?;
+    process_start_element(
+        builder,
+        element,
+        reader,
+        namespaces,
+        reader.get_ref().line(),
+        reader.get_ref().column(),
+    )
+}
+
 fn parse_from_reader<R: BufRead>(
     reader: &mut Reader<PositionTrackingReader<R>>,
     options: &ParserOptions,
@@ -155,19 +191,35 @@ fn parse_from_reader<R: BufRead>(
     let mut memory_used = 0usize;
     let mut ns_stack = NamespaceStack::new();
 
+    let mut pending_text = String::new();
     loop {
-        match reader.read_event_into(&mut buf) {
+        let event = reader.read_event_into(&mut buf);
+        // quick-xml 0.41 emits entity + character references as their own `GeneralRef` events,
+        // splitting a text run; buffer text and resolved entities, then flush a single text
+        // node at the next non-text event so a text node stays one logical unit (pre-0.41 shape).
+        if !matches!(&event, Ok(Event::Text(_)) | Ok(Event::GeneralRef(_))) {
+            flush_text(&mut pending_text, &mut builder, options, &mut memory_used)?;
+        }
+        match event {
             Ok(Event::Start(ref e)) => {
-                check_memory(options, &mut memory_used, e.len())?;
-                let line = reader.get_ref().line();
-                let column = reader.get_ref().column();
-                process_start_element(&mut builder, e, reader, &mut ns_stack, line, column)?;
+                process_element_event(
+                    e,
+                    reader,
+                    &mut builder,
+                    &mut ns_stack,
+                    options,
+                    &mut memory_used,
+                )?;
             }
             Ok(Event::Empty(ref e)) => {
-                check_memory(options, &mut memory_used, e.len())?;
-                let line = reader.get_ref().line();
-                let column = reader.get_ref().column();
-                process_start_element(&mut builder, e, reader, &mut ns_stack, line, column)?;
+                process_element_event(
+                    e,
+                    reader,
+                    &mut builder,
+                    &mut ns_stack,
+                    options,
+                    &mut memory_used,
+                )?;
                 ns_stack.pop_scope();
                 builder.end_element();
             }
@@ -176,15 +228,28 @@ fn parse_from_reader<R: BufRead>(
                 builder.end_element();
             }
             Ok(Event::Text(ref e)) => {
-                let text = e.unescape().map_err(|e| {
+                let text = e.text_content().map_err(|e| {
                     crate::parser::error::ParseError::TextDecodeError {
                         message: e.to_string(),
                     }
                 })?;
-                if !text.is_empty() {
-                    check_memory(options, &mut memory_used, text.len())?;
-                    builder.text(&text);
-                }
+                pending_text.push_str(&text);
+            }
+            Ok(Event::GeneralRef(ref e)) => {
+                // Reconstruct `&name;` and resolve via escape::unescape (predefined entities
+                // + character references), matching the text quick-xml resolved inline pre-0.41.
+                let name =
+                    e.decode()
+                        .map_err(|e| crate::parser::error::ParseError::TextDecodeError {
+                            message: e.to_string(),
+                        })?;
+                let entity = format!("&{name};");
+                let resolved = quick_xml::escape::unescape(&entity).map_err(|e| {
+                    crate::parser::error::ParseError::TextDecodeError {
+                        message: e.to_string(),
+                    }
+                })?;
+                pending_text.push_str(&resolved);
             }
             Ok(Event::CData(ref e)) => {
                 let text = std::str::from_utf8(e.as_ref())?;
@@ -257,7 +322,7 @@ fn process_start_element<R: BufRead>(
     for attr_result in e.attributes() {
         let attr = attr_result?;
         let key = std::str::from_utf8(attr.key.as_ref())?;
-        let value = attr.unescape_value().map_err(|e| {
+        let value = crate::decode_attribute_value(&attr, e.decoder()).map_err(|e| {
             crate::parser::error::ParseError::AttributeDecodeError {
                 message: e.to_string(),
             }
@@ -356,11 +421,12 @@ pub fn parse_schema_locations_from_reader<R: BufRead>(reader: R) -> Result<Vec<(
                     let key = std::str::from_utf8(attr.key.as_ref()).unwrap_or("");
                     // Match the prefixed form (xsi:schemaLocation) or bare form
                     if key == "xsi:schemaLocation" || key == "schemaLocation" {
-                        let value = attr.unescape_value().map_err(|e| {
-                            crate::parser::error::ParseError::AttributeDecodeError {
-                                message: e.to_string(),
-                            }
-                        })?;
+                        let value =
+                            crate::decode_attribute_value(&attr, e.decoder()).map_err(|e| {
+                                crate::parser::error::ParseError::AttributeDecodeError {
+                                    message: e.to_string(),
+                                }
+                            })?;
                         return parse_schema_location_value(&value);
                     }
                 }
@@ -420,6 +486,12 @@ pub fn parse_schema_location_value(value: &str) -> Result<Vec<(String, String)>>
 mod tests {
     use super::*;
 
+    fn assert_two_schema_locations(locations: &[(String, String)]) {
+        assert_eq!(locations.len(), 2);
+        assert_eq!(locations[0], ("http://ns1".into(), "schema1.xsd".into()));
+        assert_eq!(locations[1], ("http://ns2".into(), "schema2.xsd".into()));
+    }
+
     #[test]
     fn test_parse_simple() {
         let xml = r#"<root attr="value"><child>text</child></root>"#;
@@ -465,6 +537,24 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_entities_and_char_refs() {
+        // quick-xml 0.41 emits entity + character references as their own GeneralRef events,
+        // splitting the text run; the parser must resolve them and collapse the run back to a
+        // single text node (identical to the pre-0.41 inline-unescape behaviour).
+        let xml = r#"<root>x &amp; y &lt;z&gt; &#65;&#x42;</root>"#;
+        let doc = parse(xml).unwrap();
+
+        let root = doc.get_root_element().unwrap();
+        let children = root.get_child_nodes();
+        assert_eq!(
+            children.len(),
+            1,
+            "entity-split text must collapse to one node"
+        );
+        assert_eq!(children[0].get_content(), Some("x & y <z> AB".into()));
+    }
+
+    #[test]
     fn test_parse_schema_locations() {
         let xml = r#"<root xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
                           xsi:schemaLocation="http://ns1 schema1.xsd http://ns2 schema2.xsd">
@@ -472,9 +562,7 @@ mod tests {
         let doc = parse(xml).unwrap();
         let locations = parse_schema_locations(&doc).unwrap();
 
-        assert_eq!(locations.len(), 2);
-        assert_eq!(locations[0], ("http://ns1".into(), "schema1.xsd".into()));
-        assert_eq!(locations[1], ("http://ns2".into(), "schema2.xsd".into()));
+        assert_two_schema_locations(&locations);
     }
 
     #[test]
@@ -497,9 +585,7 @@ mod tests {
         </root>"#;
         let locations = parse_schema_locations_from_reader(xml.as_bytes()).unwrap();
 
-        assert_eq!(locations.len(), 2);
-        assert_eq!(locations[0], ("http://ns1".into(), "schema1.xsd".into()));
-        assert_eq!(locations[1], ("http://ns2".into(), "schema2.xsd".into()));
+        assert_two_schema_locations(&locations);
     }
 
     #[test]

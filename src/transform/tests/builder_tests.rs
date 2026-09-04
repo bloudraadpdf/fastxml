@@ -6,6 +6,20 @@ use crate::transform::{
     get_not_streamable_reason, is_streamable,
 };
 
+use super::{assert_multiple_for_each, assert_single_for_each, content_collector};
+
+fn run_to_string(transformer: StreamTransformer<'_>) -> String {
+    transformer.run().unwrap().to_string().unwrap()
+}
+
+fn apply_type_attributes(xml: &str) -> String {
+    run_to_string(
+        StreamTransformer::new(xml)
+            .on("//item", |node| node.set_attribute("type", "item"))
+            .on("//other", |node| node.set_attribute("type", "other")),
+    )
+}
+
 // =============================================================================
 // New API Tests
 // =============================================================================
@@ -14,14 +28,9 @@ use crate::transform::{
 fn test_on_single_handler() {
     let xml = r#"<root><item id="1">A</item><item id="2">B</item></root>"#;
 
-    let result = StreamTransformer::new(xml)
-        .on("//item[@id='2']", |node| {
-            node.set_attribute("modified", "true");
-        })
-        .run()
-        .unwrap()
-        .to_string()
-        .unwrap();
+    let result = run_to_string(StreamTransformer::new(xml).on("//item[@id='2']", |node| {
+        node.set_attribute("modified", "true");
+    }));
 
     assert!(result.contains(r#"modified="true""#));
     assert!(result.contains("<item id=\"1\">A</item>"));
@@ -31,17 +40,7 @@ fn test_on_single_handler() {
 fn test_on_multiple_handlers() {
     let xml = r#"<root><item>A</item><other>B</other></root>"#;
 
-    let result = StreamTransformer::new(xml)
-        .on("//item", |node| {
-            node.set_attribute("type", "item");
-        })
-        .on("//other", |node| {
-            node.set_attribute("type", "other");
-        })
-        .run()
-        .unwrap()
-        .to_string()
-        .unwrap();
+    let result = apply_type_attributes(xml);
 
     assert!(result.contains(r#"type="item""#));
     assert!(result.contains(r#"type="other""#));
@@ -49,40 +48,23 @@ fn test_on_multiple_handlers() {
 
 #[test]
 fn test_for_each_single_handler() {
-    let xml = r#"<root><item id="1"/><item id="2"/></root>"#;
-
-    let mut ids = Vec::new();
-    StreamTransformer::new(xml)
-        .on("//item", |node| {
-            if let Some(id) = node.get_attribute("id") {
-                ids.push(id);
-            }
-        })
-        .for_each()
-        .unwrap();
-
-    assert_eq!(ids, vec!["1", "2"]);
+    assert_single_for_each(|xml, ids| {
+        StreamTransformer::new(xml)
+            .on("//item", |node| ids.extend(node.get_attribute("id")))
+            .for_each()
+            .unwrap();
+    });
 }
 
 #[test]
 fn test_for_each_multiple_handlers() {
-    let xml = r#"<root><item>A</item><other>B</other></root>"#;
-
-    let mut items = Vec::new();
-    let mut others = Vec::new();
-
-    StreamTransformer::new(xml)
-        .on("//item", |node| {
-            items.push(node.get_content().unwrap_or_default());
-        })
-        .on("//other", |node| {
-            others.push(node.get_content().unwrap_or_default());
-        })
-        .for_each()
-        .unwrap();
-
-    assert_eq!(items, vec!["A"]);
-    assert_eq!(others, vec!["B"]);
+    assert_multiple_for_each(|xml, items, others| {
+        StreamTransformer::new(xml)
+            .on("//item", content_collector(items))
+            .on("//other", content_collector(others))
+            .for_each()
+            .unwrap();
+    });
 }
 
 #[test]
@@ -141,15 +123,11 @@ fn test_transform_output_count() {
 fn test_with_namespaces() {
     let xml = r#"<root xmlns:ns="http://example.com"><ns:item/></root>"#;
 
-    let result = StreamTransformer::new(xml)
-        .namespace("ns", "http://example.com")
-        .on("//ns:item", |node| {
-            node.set_attribute("found", "true");
-        })
-        .run()
-        .unwrap()
-        .to_string()
-        .unwrap();
+    let result = run_to_string(
+        StreamTransformer::new(xml)
+            .namespace("ns", "http://example.com")
+            .on("//ns:item", |node| node.set_attribute("found", "true")),
+    );
 
     assert!(result.contains(r#"found="true""#));
 }
@@ -158,14 +136,7 @@ fn test_with_namespaces() {
 fn test_remove_element() {
     let xml = r#"<root><keep>A</keep><remove>B</remove><keep>C</keep></root>"#;
 
-    let result = StreamTransformer::new(xml)
-        .on("//remove", |node| {
-            node.remove();
-        })
-        .run()
-        .unwrap()
-        .to_string()
-        .unwrap();
+    let result = run_to_string(StreamTransformer::new(xml).on("//remove", |node| node.remove()));
 
     assert!(!result.contains("<remove>"));
     assert!(result.contains("<keep>A</keep>"));
@@ -176,15 +147,11 @@ fn test_remove_element() {
 fn test_fallback_for_last_with_allow_fallback() {
     let xml = "<root><item>A</item><item>B</item><item>C</item></root>";
 
-    let result = StreamTransformer::new(xml)
-        .allow_fallback()
-        .on("//item[last()]", |node| {
-            node.set_attribute("last", "true");
-        })
-        .run()
-        .unwrap()
-        .to_string()
-        .unwrap();
+    let result = run_to_string(
+        StreamTransformer::new(xml)
+            .allow_fallback()
+            .on("//item[last()]", |node| node.set_attribute("last", "true")),
+    );
 
     assert!(result.contains(r#"last="true""#));
     assert_eq!(result.matches(r#"last="true""#).count(), 1);
@@ -228,16 +195,12 @@ fn test_with_root_namespaces() {
         <gml:point id="1"/>
     </root>"#;
 
-    let result = StreamTransformer::new(xml)
-        .with_root_namespaces()
-        .unwrap()
-        .on("//gml:point", |node| {
-            node.set_attribute("found", "true");
-        })
-        .run()
-        .unwrap()
-        .to_string()
-        .unwrap();
+    let result = run_to_string(
+        StreamTransformer::new(xml)
+            .with_root_namespaces()
+            .unwrap()
+            .on("//gml:point", |node| node.set_attribute("found", "true")),
+    );
 
     assert!(result.contains(r#"found="true""#));
 }
@@ -588,17 +551,7 @@ fn test_run_multi_handler_single_pass() {
     // Test that multiple handlers in run() are processed in single pass
     let xml = r#"<root><item>A</item><other>B</other><item>C</item></root>"#;
 
-    let result = StreamTransformer::new(xml)
-        .on("//item", |node| {
-            node.set_attribute("type", "item");
-        })
-        .on("//other", |node| {
-            node.set_attribute("type", "other");
-        })
-        .run()
-        .unwrap()
-        .to_string()
-        .unwrap();
+    let result = apply_type_attributes(xml);
 
     // Verify both handlers were applied
     assert!(result.contains(r#"type="item""#));
@@ -623,14 +576,9 @@ fn test_run_multi_handler_zero_copy_preservation() {
   <item>transform</item>
 </root>"#;
 
-    let result = StreamTransformer::new(xml)
-        .on("//item", |node| {
-            node.set_attribute("modified", "true");
-        })
-        .run()
-        .unwrap()
-        .to_string()
-        .unwrap();
+    let result = run_to_string(
+        StreamTransformer::new(xml).on("//item", |node| node.set_attribute("modified", "true")),
+    );
 
     // XML declaration preserved
     assert!(result.starts_with(r#"<?xml version="1.0"?>"#));
@@ -647,17 +595,11 @@ fn test_run_multi_handler_remove_element() {
     // Test removing elements with multi-handler transform
     let xml = r#"<root><keep>A</keep><remove>B</remove><modify>C</modify></root>"#;
 
-    let result = StreamTransformer::new(xml)
-        .on("//remove", |node| {
-            node.remove();
-        })
-        .on("//modify", |node| {
-            node.set_attribute("changed", "true");
-        })
-        .run()
-        .unwrap()
-        .to_string()
-        .unwrap();
+    let result = run_to_string(
+        StreamTransformer::new(xml)
+            .on("//remove", |node| node.remove())
+            .on("//modify", |node| node.set_attribute("changed", "true")),
+    );
 
     assert!(!result.contains("<remove>"));
     assert!(result.contains("<keep>A</keep>"));
@@ -669,18 +611,16 @@ fn test_run_multi_handler_first_match_wins_nested() {
     // Test first-match-wins behavior for nested elements
     let xml = r#"<root><outer><inner>content</inner></outer></root>"#;
 
-    let result = StreamTransformer::new(xml)
-        .on("//outer", |node| {
-            node.set_attribute("matched", "outer");
-        })
-        .on("//inner", |node| {
-            // This should NOT be called because outer matched first
-            node.set_attribute("matched", "inner");
-        })
-        .run()
-        .unwrap()
-        .to_string()
-        .unwrap();
+    let result = run_to_string(
+        StreamTransformer::new(xml)
+            .on("//outer", |node| {
+                node.set_attribute("matched", "outer");
+            })
+            .on("//inner", |node| {
+                // This should NOT be called because outer matched first
+                node.set_attribute("matched", "inner");
+            }),
+    );
 
     // Only outer should have been modified
     assert!(result.contains(r#"matched="outer""#));

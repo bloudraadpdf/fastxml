@@ -6,6 +6,8 @@ use std::rc::Rc;
 use crate::transform::TransformError;
 use crate::transform::reader::StreamTransformerReader;
 
+use super::{assert_multiple_for_each, assert_single_for_each, content_collector};
+
 fn make_reader(xml: &str) -> std::io::BufReader<std::io::Cursor<&[u8]>> {
     std::io::BufReader::new(std::io::Cursor::new(xml.as_bytes()))
 }
@@ -51,40 +53,23 @@ fn test_reader_multiple_handlers() {
 
 #[test]
 fn test_reader_for_each() {
-    let xml = r#"<root><item id="1"/><item id="2"/></root>"#;
-
-    let mut ids = Vec::new();
-    StreamTransformerReader::new(make_reader(xml))
-        .on("//item", |node| {
-            if let Some(id) = node.get_attribute("id") {
-                ids.push(id);
-            }
-        })
-        .for_each()
-        .unwrap();
-
-    assert_eq!(ids, vec!["1", "2"]);
+    assert_single_for_each(|xml, ids| {
+        StreamTransformerReader::new(make_reader(xml))
+            .on("//item", |node| ids.extend(node.get_attribute("id")))
+            .for_each()
+            .unwrap();
+    });
 }
 
 #[test]
 fn test_reader_for_each_multiple_handlers() {
-    let xml = r#"<root><item>A</item><other>B</other></root>"#;
-
-    let mut items = Vec::new();
-    let mut others = Vec::new();
-
-    StreamTransformerReader::new(make_reader(xml))
-        .on("//item", |node| {
-            items.push(node.get_content().unwrap_or_default());
-        })
-        .on("//other", |node| {
-            others.push(node.get_content().unwrap_or_default());
-        })
-        .for_each()
-        .unwrap();
-
-    assert_eq!(items, vec!["A"]);
-    assert_eq!(others, vec!["B"]);
+    assert_multiple_for_each(|xml, items, others| {
+        StreamTransformerReader::new(make_reader(xml))
+            .on("//item", content_collector(items))
+            .on("//other", content_collector(others))
+            .for_each()
+            .unwrap();
+    });
 }
 
 #[test]

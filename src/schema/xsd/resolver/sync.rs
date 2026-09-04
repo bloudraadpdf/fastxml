@@ -3,22 +3,19 @@
 //! This module provides the synchronous implementation of schema resolution
 //! for import/include chains.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::VecDeque;
 
 use crate::error::Result;
 use crate::schema::fetcher::SchemaFetcher;
 
 use super::super::parser::parse_xsd_ast;
 use super::super::types::XsdSchema;
-use super::common::resolve_uri;
+use super::common::{ResolutionState, impl_resolution_outputs, resolve_uri};
 
 /// Schema resolver that handles import/include chains.
 pub struct SchemaResolver<'a, F: SchemaFetcher> {
     fetcher: &'a F,
-    /// Resolved schemas by URI
-    schemas: HashMap<String, XsdSchema>,
-    /// URIs currently being resolved (for cycle detection)
-    resolving: HashSet<String>,
+    state: ResolutionState,
 }
 
 impl<'a, F: SchemaFetcher> SchemaResolver<'a, F> {
@@ -26,8 +23,7 @@ impl<'a, F: SchemaFetcher> SchemaResolver<'a, F> {
     pub fn new(fetcher: &'a F) -> Self {
         Self {
             fetcher,
-            schemas: HashMap::new(),
-            resolving: HashSet::new(),
+            state: ResolutionState::new(),
         }
     }
 
@@ -35,80 +31,8 @@ impl<'a, F: SchemaFetcher> SchemaResolver<'a, F> {
     ///
     /// Returns all resolved schemas in dependency order (dependencies first).
     pub fn resolve_all(&mut self, entry_content: &[u8], entry_uri: &str) -> Result<Vec<XsdSchema>> {
-        // Parse the entry schema
-        let entry_schema = parse_xsd_ast(entry_content)?;
-
-        // Store and track the entry
-        self.schemas.insert(entry_uri.to_string(), entry_schema);
-
-        // Use BFS to resolve all dependencies
-        let mut queue: VecDeque<String> = VecDeque::new();
-        queue.push_back(entry_uri.to_string());
-
-        while let Some(current_uri) = queue.pop_front() {
-            if self.resolving.contains(&current_uri) {
-                return Err(crate::schema::error::SchemaError::CircularDependency {
-                    uri: current_uri,
-                }
-                .into());
-            }
-            self.resolving.insert(current_uri.clone());
-
-            // Get imports and includes from the current schema
-            let (imports, includes) = {
-                let schema = self.schemas.get(&current_uri).ok_or_else(|| {
-                    crate::schema::error::SchemaError::SchemaNotFound {
-                        uri: current_uri.clone(),
-                    }
-                })?;
-                (schema.imports.clone(), schema.includes.clone())
-            };
-
-            // Process imports
-            for import in imports {
-                if let Some(location) = &import.schema_location {
-                    let resolved_uri = resolve_uri(&current_uri, location)?;
-
-                    if !self.schemas.contains_key(&resolved_uri) {
-                        let content = self.fetch_schema(&resolved_uri)?;
-                        let schema = parse_xsd_ast(&content)?;
-                        self.schemas.insert(resolved_uri.clone(), schema);
-                        queue.push_back(resolved_uri);
-                    }
-                }
-            }
-
-            // Process includes
-            for include in includes {
-                let resolved_uri = resolve_uri(&current_uri, &include.schema_location)?;
-
-                if !self.schemas.contains_key(&resolved_uri) {
-                    let content = self.fetch_schema(&resolved_uri)?;
-                    let schema = parse_xsd_ast(&content)?;
-                    self.schemas.insert(resolved_uri.clone(), schema);
-                    queue.push_back(resolved_uri);
-                }
-            }
-
-            self.resolving.remove(&current_uri);
-        }
-
-        // Return schemas in order (entry last for easier compilation)
-        let mut result: Vec<XsdSchema> = Vec::new();
-
-        // First add all non-entry schemas
-        for (uri, schema) in &self.schemas {
-            if uri != entry_uri {
-                result.push(schema.clone());
-            }
-        }
-
-        // Add entry schema last
-        if let Some(entry) = self.schemas.remove(entry_uri) {
-            result.push(entry);
-        }
-
-        Ok(result)
+        self.insert_and_resolve(entry_content, entry_uri)?;
+        Ok(self.state.take_entry_last(entry_uri))
     }
 
     /// Fetches a schema via the fetcher (caching is handled by the fetcher).
@@ -131,81 +55,31 @@ impl<'a, F: SchemaFetcher> SchemaResolver<'a, F> {
     /// * `entry_uri` - URI for the entry schema (used for resolving relative imports)
     pub fn resolve_entry(&mut self, entry_content: &[u8], entry_uri: &str) -> Result<()> {
         // Skip if already resolved
-        if self.schemas.contains_key(entry_uri) {
+        if self.state.contains(entry_uri) {
             return Ok(());
         }
+        self.insert_and_resolve(entry_content, entry_uri)
+    }
 
-        // Parse the entry schema
-        let entry_schema = parse_xsd_ast(entry_content)?;
-
-        // Store and track the entry
-        self.schemas.insert(entry_uri.to_string(), entry_schema);
-
-        // Use BFS to resolve all dependencies
-        let mut queue: VecDeque<String> = VecDeque::new();
-        queue.push_back(entry_uri.to_string());
+    fn insert_and_resolve(&mut self, entry_content: &[u8], entry_uri: &str) -> Result<()> {
+        self.state.insert_entry(entry_content, entry_uri)?;
+        let mut queue = VecDeque::from([entry_uri.to_string()]);
 
         while let Some(current_uri) = queue.pop_front() {
-            if self.resolving.contains(&current_uri) {
-                return Err(crate::schema::error::SchemaError::CircularDependency {
-                    uri: current_uri,
-                }
-                .into());
-            }
-            self.resolving.insert(current_uri.clone());
-
-            // Get imports and includes from the current schema
-            let (imports, includes) = {
-                let schema = self.schemas.get(&current_uri).ok_or_else(|| {
-                    crate::schema::error::SchemaError::SchemaNotFound {
-                        uri: current_uri.clone(),
-                    }
-                })?;
-                (schema.imports.clone(), schema.includes.clone())
-            };
-
-            // Process imports
-            for import in imports {
-                if let Some(location) = &import.schema_location {
-                    let resolved_uri = resolve_uri(&current_uri, location)?;
-
-                    if !self.schemas.contains_key(&resolved_uri) {
-                        let content = self.fetch_schema(&resolved_uri)?;
-                        let schema = parse_xsd_ast(&content)?;
-                        self.schemas.insert(resolved_uri.clone(), schema);
-                        queue.push_back(resolved_uri);
-                    }
-                }
-            }
-
-            // Process includes
-            for include in includes {
-                let resolved_uri = resolve_uri(&current_uri, &include.schema_location)?;
-
-                if !self.schemas.contains_key(&resolved_uri) {
+            for location in self.state.begin(&current_uri)? {
+                let resolved_uri = resolve_uri(&current_uri, &location)?;
+                if !self.state.contains(&resolved_uri) {
                     let content = self.fetch_schema(&resolved_uri)?;
                     let schema = parse_xsd_ast(&content)?;
-                    self.schemas.insert(resolved_uri.clone(), schema);
+                    self.state.insert_dependency(resolved_uri.clone(), schema);
                     queue.push_back(resolved_uri);
                 }
             }
-
-            self.resolving.remove(&current_uri);
+            self.state.finish(&current_uri);
         }
 
         Ok(())
     }
 
-    /// Consumes the resolver and returns all accumulated schemas as a Vec.
-    ///
-    /// Use this after calling [`Self::resolve_entry`] one or more times to get
-    /// all resolved schemas for compilation.
-    pub fn take_all_schemas(self) -> Vec<XsdSchema> {
-        self.schemas.into_values().collect()
-    }
-
-    /// Consumes the resolver and returns the resolved schemas.
-    pub fn into_schemas(self) -> HashMap<String, XsdSchema> {
-        self.schemas
-    }
+    impl_resolution_outputs!();
 }

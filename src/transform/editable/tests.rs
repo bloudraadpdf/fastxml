@@ -60,6 +60,59 @@ fn create_nested_node() -> EditableNode {
     builder.build().unwrap()
 }
 
+fn create_namespaced_child(
+    child_name: &str,
+    attributes: Vec<(&str, &str)>,
+    text: Option<&str>,
+    register_namespace: bool,
+) -> EditableNode {
+    let mut builder = EditableNodeBuilder::new();
+    let namespace = Namespace::new("ns", "http://example.com");
+    if register_namespace {
+        builder.set_namespaces(HashMap::from([(
+            "ns".to_string(),
+            "http://example.com".to_string(),
+        )]));
+    }
+    builder.start_element(
+        "root",
+        Some("ns"),
+        Some("http://example.com"),
+        vec![],
+        vec![],
+        vec![namespace],
+    );
+    builder.start_element(
+        child_name,
+        Some("ns"),
+        Some("http://example.com"),
+        attributes,
+        vec![],
+        vec![],
+    );
+    if let Some(text) = text {
+        builder.text(text);
+    }
+    builder.end_element();
+    builder.end_element();
+    builder.build().unwrap()
+}
+
+fn create_gml_attribute_node() -> EditableNode {
+    let mut builder = EditableNodeBuilder::new();
+    let namespace = Namespace::new("gml", "http://www.opengis.net/gml");
+    builder.start_element(
+        "Feature",
+        None,
+        None,
+        vec![("id", "f1")],
+        vec![("id", "gml", "http://www.opengis.net/gml")],
+        vec![namespace],
+    );
+    builder.end_element();
+    builder.build().unwrap()
+}
+
 #[test]
 fn test_read_api() {
     let node = create_test_node();
@@ -525,32 +578,7 @@ fn test_evaluate_xpath_text_content() {
 
 #[test]
 fn test_evaluate_xpath_with_namespaces() {
-    let mut namespaces = HashMap::new();
-    namespaces.insert("ns".to_string(), "http://example.com".to_string());
-
-    let mut builder = EditableNodeBuilder::new();
-    let ns = Namespace::new("ns", "http://example.com");
-    builder.set_namespaces(namespaces.clone());
-    builder.start_element(
-        "root",
-        Some("ns"),
-        Some("http://example.com"),
-        vec![],
-        vec![],
-        vec![ns.clone()],
-    );
-    builder.start_element(
-        "child",
-        Some("ns"),
-        Some("http://example.com"),
-        vec![],
-        vec![],
-        vec![],
-    );
-    builder.text("Hello");
-    builder.end_element();
-    builder.end_element();
-    let node = builder.build().unwrap();
+    let node = create_namespaced_child("child", vec![], Some("Hello"), true);
 
     let result = node.evaluate_xpath("//ns:child").unwrap();
     let nodes = result.into_nodes();
@@ -574,28 +602,7 @@ fn test_evaluate_xpath_invalid() {
 
 #[test]
 fn test_evaluate_xpath_local_name() {
-    let mut builder = EditableNodeBuilder::new();
-    let ns = Namespace::new("ns", "http://example.com");
-    builder.start_element(
-        "root",
-        Some("ns"),
-        Some("http://example.com"),
-        vec![],
-        vec![],
-        vec![ns.clone()],
-    );
-    builder.start_element(
-        "item",
-        Some("ns"),
-        Some("http://example.com"),
-        vec![("id", "1")],
-        vec![],
-        vec![],
-    );
-    builder.text("A");
-    builder.end_element();
-    builder.end_element();
-    let node = builder.build().unwrap();
+    let node = create_namespaced_child("item", vec![("id", "1")], Some("A"), false);
 
     let result = node.evaluate_xpath("//*[local-name()='item']").unwrap();
     let nodes = result.into_nodes();
@@ -609,18 +616,7 @@ fn test_evaluate_xpath_local_name() {
 
 #[test]
 fn test_get_attribute_ns_found() {
-    let mut builder = EditableNodeBuilder::new();
-    let ns = Namespace::new("gml", "http://www.opengis.net/gml");
-    builder.start_element(
-        "Feature",
-        None,
-        None,
-        vec![("id", "f1")],
-        vec![("id", "gml", "http://www.opengis.net/gml")],
-        vec![ns],
-    );
-    builder.end_element();
-    let node = builder.build().unwrap();
+    let node = create_gml_attribute_node();
 
     assert_eq!(
         node.get_attribute_ns("http://www.opengis.net/gml", "id"),
@@ -630,18 +626,7 @@ fn test_get_attribute_ns_found() {
 
 #[test]
 fn test_get_attribute_ns_not_found() {
-    let mut builder = EditableNodeBuilder::new();
-    let ns = Namespace::new("gml", "http://www.opengis.net/gml");
-    builder.start_element(
-        "Feature",
-        None,
-        None,
-        vec![("id", "f1")],
-        vec![("id", "gml", "http://www.opengis.net/gml")],
-        vec![ns],
-    );
-    builder.end_element();
-    let node = builder.build().unwrap();
+    let node = create_gml_attribute_node();
 
     // Wrong URI should return None
     assert_eq!(node.get_attribute_ns("http://wrong.uri", "id"), None,);
@@ -696,27 +681,7 @@ fn test_editable_node_ref_child_nodes() {
 
 #[test]
 fn test_editable_node_ref_namespace_uri() {
-    let mut builder = EditableNodeBuilder::new();
-    let ns = Namespace::new("ns", "http://example.com");
-    builder.start_element(
-        "root",
-        Some("ns"),
-        Some("http://example.com"),
-        vec![],
-        vec![],
-        vec![ns.clone()],
-    );
-    builder.start_element(
-        "child",
-        Some("ns"),
-        Some("http://example.com"),
-        vec![],
-        vec![],
-        vec![],
-    );
-    builder.end_element();
-    builder.end_element();
-    let node = builder.build().unwrap();
+    let node = create_namespaced_child("child", vec![], None, false);
 
     let children = node.children();
     assert_eq!(children.len(), 1);

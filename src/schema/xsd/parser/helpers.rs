@@ -90,7 +90,7 @@ pub(super) fn convert_start_event(
     for attr_result in e.attributes() {
         let attr = attr_result?;
         let key = std::str::from_utf8(attr.key.as_ref())?;
-        let value = attr.unescape_value().map_err(|e| {
+        let value = crate::decode_attribute_value(&attr, e.decoder()).map_err(|e| {
             crate::parser::error::ParseError::AttributeDecodeError {
                 message: e.to_string(),
             }

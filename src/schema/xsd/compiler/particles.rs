@@ -71,54 +71,22 @@ impl XsdCompiler {
         let seq_min_zero = seq.min_occurs == Occurs::Count(0);
 
         for item in &seq.particles {
-            match item {
-                XsdParticleItem::Element(elem) => {
-                    let mut compiled = self.compile_element(elem)?;
-                    // Propagate sequence's maxOccurs to child element
-                    compiled.max_occurs = Self::multiply_occurs(compiled.max_occurs, seq_max);
-                    // If sequence is optional (minOccurs=0), child is also optional
-                    if seq_min_zero {
-                        compiled.min_occurs = 0;
-                    }
-                    elements.push(compiled);
-                }
-                XsdParticleItem::Sequence(nested) => {
-                    let mut nested_elems = self.compile_sequence(nested)?;
-                    // Propagate this sequence's occurs to nested results
-                    for e in &mut nested_elems {
-                        e.max_occurs = Self::multiply_occurs(e.max_occurs, seq_max);
-                        if seq_min_zero {
-                            e.min_occurs = 0;
-                        }
-                    }
-                    elements.extend(nested_elems);
-                }
-                XsdParticleItem::Choice(nested) => {
-                    let mut nested_elems = self.compile_choice(nested)?;
-                    // Propagate this sequence's occurs to nested results
-                    for e in &mut nested_elems {
-                        e.max_occurs = Self::multiply_occurs(e.max_occurs, seq_max);
-                        if seq_min_zero {
-                            e.min_occurs = 0;
-                        }
-                    }
-                    elements.extend(nested_elems);
-                }
+            let mut compiled = match item {
+                XsdParticleItem::Element(element) => vec![self.compile_element(element)?],
+                XsdParticleItem::Sequence(nested) => self.compile_sequence(nested)?,
+                XsdParticleItem::Choice(nested) => self.compile_choice(nested)?,
                 XsdParticleItem::GroupRef(group_ref) => {
-                    let mut group_elems = self.expand_group_ref_to_elements(group_ref)?;
-                    // Propagate this sequence's occurs to the group's members.
-                    for e in &mut group_elems {
-                        e.max_occurs = Self::multiply_occurs(e.max_occurs, seq_max);
-                        if seq_min_zero {
-                            e.min_occurs = 0;
-                        }
-                    }
-                    elements.extend(group_elems);
+                    self.expand_group_ref_to_elements(group_ref)?
                 }
-                XsdParticleItem::Any(_) => {
-                    // Any elements are handled elsewhere
+                XsdParticleItem::Any(_) => continue,
+            };
+            for element in &mut compiled {
+                element.max_occurs = Self::multiply_occurs(element.max_occurs, seq_max);
+                if seq_min_zero {
+                    element.min_occurs = 0;
                 }
             }
+            elements.extend(compiled);
         }
 
         Ok(elements)

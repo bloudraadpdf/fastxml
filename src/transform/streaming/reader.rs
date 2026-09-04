@@ -1,10 +1,11 @@
 //! Reader-based streaming processing functions.
 
+use crate::TextContent;
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
 
 use quick_xml::Reader;
-use quick_xml::events::Event;
+use quick_xml::events::{BytesEnd, BytesStart, Event};
 use quick_xml::writer::Writer as XmlWriter;
 
 use super::super::editable::{EditableNode, EditableNodeBuilder};
@@ -15,6 +16,171 @@ use super::helpers::{
     extract_element_info, serialize_editable, xml_parse_error_at_offset,
 };
 use super::{HandlerState, MultiHandler, MultiTransformHandler, TransformHandlerState};
+
+fn new_reader<R: BufRead>(reader: R) -> (Reader<R>, PathTracker, Vec<u8>) {
+    let mut reader = Reader::from_reader(reader);
+    reader.config_mut().trim_text(false);
+    (reader, PathTracker::new(), Vec::new())
+}
+
+fn reader_error<R: BufRead>(
+    reader: &Reader<R>,
+    tracker: &PathTracker,
+    error: impl std::fmt::Debug,
+) -> TransformError {
+    xml_parse_error_at_offset(
+        format!("{error:?}"),
+        reader.buffer_position() as usize,
+        Some(tracker.current_xpath()),
+    )
+}
+
+fn new_builder(namespaces: &HashMap<String, String>) -> EditableNodeBuilder {
+    let mut builder = EditableNodeBuilder::new();
+    builder.set_namespaces(namespaces.clone());
+    builder
+}
+
+fn write_event<W: Write>(writer: &mut XmlWriter<W>, event: Event<'_>) -> TransformResult<()> {
+    writer
+        .write_event(event)
+        .map_err(|err| TransformError::Io(std::io::Error::other(err)))
+}
+
+fn add_content_to_builder(
+    builder: &mut EditableNodeBuilder,
+    event: &Event<'_>,
+) -> TransformResult<()> {
+    match event {
+        Event::Text(text) => {
+            let text = text
+                .text_content()
+                .map_err(|err| TransformError::XmlParse(err.to_string()))?;
+            builder.text(&text);
+        }
+        Event::CData(text) => {
+            builder.cdata(std::str::from_utf8(text).map_err(TransformError::Utf8)?)
+        }
+        Event::Comment(text) => {
+            builder.comment(std::str::from_utf8(text).map_err(TransformError::Utf8)?)
+        }
+        _ => unreachable!("content handler requires text, CDATA, or comment"),
+    }
+    Ok(())
+}
+
+fn push_element(
+    tracker: &mut PathTracker,
+    element: &BytesStart<'_>,
+    position: usize,
+    namespaces: &HashMap<String, String>,
+) -> TransformResult<()> {
+    tracker.push_element(extract_element_info(element, position, namespaces)?);
+    Ok(())
+}
+
+fn apply_transform<W, F>(
+    builder: EditableNodeBuilder,
+    transform: &mut F,
+    writer: &mut XmlWriter<W>,
+    count: &mut usize,
+) -> TransformResult<()>
+where
+    W: Write,
+    F: FnMut(&mut EditableNode) + ?Sized,
+{
+    let mut editable = builder.build()?;
+    transform(&mut editable);
+    *count += 1;
+    if !editable.is_removed() {
+        serialize_editable(&editable, writer.get_mut())?;
+    }
+    Ok(())
+}
+
+fn matching_handler(states: &[TransformHandlerState<'_>], tracker: &PathTracker) -> Option<usize> {
+    states.iter().position(|state| tracker.matches(state.xpath))
+}
+
+fn active_builder<'a>(
+    states: &'a mut [TransformHandlerState<'_>],
+    active_handler: Option<usize>,
+) -> Option<&'a mut EditableNodeBuilder> {
+    active_handler.and_then(|index| states[index].builder.as_mut())
+}
+
+fn finish_end<W: Write>(
+    writer: &mut XmlWriter<W>,
+    tracker: &mut PathTracker,
+    event: &BytesEnd<'_>,
+    echo: bool,
+) -> TransformResult<()> {
+    if echo {
+        write_event(writer, Event::End(event.clone()))?;
+    }
+    tracker.pop_element();
+    Ok(())
+}
+
+fn handle_empty<F>(
+    active: Option<&mut EditableNodeBuilder>,
+    matched: bool,
+    event: &BytesStart<'_>,
+    namespaces: &HashMap<String, String>,
+    mut on_match: F,
+) -> TransformResult<bool>
+where
+    F: FnMut(EditableNodeBuilder) -> TransformResult<()>,
+{
+    if let Some(builder) = active {
+        add_empty_to_builder(builder, event, namespaces)?;
+    } else if matched {
+        let mut builder = new_builder(namespaces);
+        add_empty_to_builder(&mut builder, event, namespaces)?;
+        on_match(builder)?;
+    } else {
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+fn close_builder<F>(
+    builder: Option<EditableNodeBuilder>,
+    event: &BytesEnd<'_>,
+    mut on_complete: F,
+) -> TransformResult<Option<EditableNodeBuilder>>
+where
+    F: FnMut(EditableNodeBuilder) -> TransformResult<()>,
+{
+    let Some(mut builder) = builder else {
+        return Ok(None);
+    };
+    add_end_to_builder(&mut builder, event)?;
+    if builder.is_complete() {
+        on_complete(builder)?;
+        Ok(None)
+    } else {
+        Ok(Some(builder))
+    }
+}
+
+fn read_events<R, F>(reader: R, mut handle: F) -> TransformResult<()>
+where
+    R: BufRead,
+    F: FnMut(Event<'_>, usize, &mut PathTracker) -> TransformResult<()>,
+{
+    let (mut reader, mut tracker, mut buffer) = new_reader(reader);
+    loop {
+        let position = reader.buffer_position() as usize;
+        match reader.read_event_into(&mut buffer) {
+            Ok(Event::Eof) => break,
+            Ok(event) => handle(event, position, &mut tracker)?,
+            Err(error) => return Err(reader_error(&reader, &tracker, error)),
+        }
+        buffer.clear();
+    }
+    Ok(())
+}
 
 /// Processes XML from a reader with streaming iteration (no transformation output).
 ///
@@ -31,43 +197,30 @@ where
     R: BufRead,
     F: FnMut(&mut EditableNode),
 {
-    let mut xml_reader = Reader::from_reader(reader);
-    xml_reader.config_mut().trim_text(false);
-
-    let mut tracker = PathTracker::new();
     let mut subtree_builder: Option<EditableNodeBuilder> = None;
     let mut match_count: usize = 0;
-    let mut buf = Vec::new();
 
-    loop {
-        let before_pos = xml_reader.buffer_position() as usize;
-
-        match xml_reader.read_event_into(&mut buf) {
-            Ok(Event::Start(e)) => {
-                let element_info = extract_element_info(&e, before_pos, namespaces)?;
-
-                tracker.push_element(element_info);
+    read_events(reader, |event, position, tracker| {
+        match event {
+            Event::Start(e) => {
+                push_element(tracker, &e, position, namespaces)?;
 
                 if let Some(ref mut builder) = subtree_builder {
                     add_start_to_builder(builder, &e, namespaces)?;
                 } else if tracker.matches(xpath) {
-                    let mut builder = EditableNodeBuilder::new();
-                    builder.set_namespaces(namespaces.clone());
+                    let mut builder = new_builder(namespaces);
                     add_start_to_builder(&mut builder, &e, namespaces)?;
                     subtree_builder = Some(builder);
                 }
             }
 
-            Ok(Event::Empty(e)) => {
-                let element_info = extract_element_info(&e, before_pos, namespaces)?;
-
-                tracker.push_element(element_info);
+            Event::Empty(e) => {
+                push_element(tracker, &e, position, namespaces)?;
 
                 if let Some(ref mut builder) = subtree_builder {
                     add_empty_to_builder(builder, &e, namespaces)?;
                 } else if tracker.matches(xpath) {
-                    let mut builder = EditableNodeBuilder::new();
-                    builder.set_namespaces(namespaces.clone());
+                    let mut builder = new_builder(namespaces);
                     add_empty_to_builder(&mut builder, &e, namespaces)?;
 
                     let mut editable = builder.build()?;
@@ -78,7 +231,7 @@ where
                 tracker.pop_element();
             }
 
-            Ok(Event::End(e)) => {
+            Event::End(e) => {
                 if let Some(mut builder) = subtree_builder.take() {
                     add_end_to_builder(&mut builder, &e)?;
 
@@ -94,47 +247,17 @@ where
                 tracker.pop_element();
             }
 
-            Ok(Event::Text(e)) => {
+            event @ (Event::Text(_) | Event::CData(_) | Event::Comment(_)) => {
                 if let Some(ref mut builder) = subtree_builder {
-                    let text = e
-                        .unescape()
-                        .map_err(|err| TransformError::XmlParse(err.to_string()))?;
-                    builder.text(&text);
+                    add_content_to_builder(builder, &event)?;
                 }
             }
 
-            Ok(Event::CData(e)) => {
-                if let Some(ref mut builder) = subtree_builder {
-                    let text = std::str::from_utf8(&e).map_err(TransformError::Utf8)?;
-                    builder.cdata(text);
-                }
-            }
-
-            Ok(Event::Comment(e)) => {
-                if let Some(ref mut builder) = subtree_builder {
-                    let text = std::str::from_utf8(&e).map_err(TransformError::Utf8)?;
-                    builder.comment(text);
-                }
-            }
-
-            Ok(Event::Eof) => {
-                break;
-            }
-
-            Ok(_) => {}
-
-            Err(e) => {
-                let byte_offset = xml_reader.buffer_position() as usize;
-                return Err(xml_parse_error_at_offset(
-                    format!("{:?}", e),
-                    byte_offset,
-                    Some(tracker.current_xpath()),
-                ));
-            }
+            _ => {}
         }
 
-        buf.clear();
-    }
+        Ok(())
+    })?;
 
     Ok(match_count)
 }
@@ -160,157 +283,79 @@ where
     W: Write,
     F: FnMut(&mut EditableNode),
 {
-    let mut xml_reader = Reader::from_reader(reader);
-    xml_reader.config_mut().trim_text(false);
-
     let mut xml_writer = XmlWriter::new(writer);
-
-    let mut tracker = PathTracker::new();
     let mut subtree_builder: Option<EditableNodeBuilder> = None;
     let mut transform_count: usize = 0;
-    let mut buf = Vec::new();
 
-    loop {
-        let before_pos = xml_reader.buffer_position() as usize;
-
-        match xml_reader.read_event_into(&mut buf) {
-            Ok(Event::Start(ref e)) => {
-                let element_info = extract_element_info(e, before_pos, namespaces)?;
-
-                tracker.push_element(element_info);
+    read_events(reader, |event, position, tracker| {
+        match event {
+            Event::Start(ref e) => {
+                push_element(tracker, e, position, namespaces)?;
 
                 if let Some(ref mut builder) = subtree_builder {
                     add_start_to_builder(builder, e, namespaces)?;
                 } else if tracker.matches(xpath) {
                     // Match starts - start building DOM subtree
-                    let mut builder = EditableNodeBuilder::new();
-                    builder.set_namespaces(namespaces.clone());
+                    let mut builder = new_builder(namespaces);
                     add_start_to_builder(&mut builder, e, namespaces)?;
                     subtree_builder = Some(builder);
                 } else {
                     // No match - echo event to writer
-                    xml_writer
-                        .write_event(Event::Start(e.clone()))
-                        .map_err(|err| TransformError::Io(std::io::Error::other(err)))?;
+                    write_event(&mut xml_writer, Event::Start(e.clone()))?;
                 }
             }
 
-            Ok(Event::Empty(ref e)) => {
-                let element_info = extract_element_info(e, before_pos, namespaces)?;
-
-                tracker.push_element(element_info);
-
-                if let Some(ref mut builder) = subtree_builder {
-                    add_empty_to_builder(builder, e, namespaces)?;
-                } else if tracker.matches(xpath) {
-                    let mut builder = EditableNodeBuilder::new();
-                    builder.set_namespaces(namespaces.clone());
-                    add_empty_to_builder(&mut builder, e, namespaces)?;
-
-                    let mut editable = builder.build()?;
-                    transform_fn(&mut editable);
-                    transform_count += 1;
-
-                    if !editable.is_removed() {
-                        serialize_editable(&editable, xml_writer.get_mut())?;
-                    }
-                } else {
-                    xml_writer
-                        .write_event(Event::Empty(e.clone()))
-                        .map_err(|err| TransformError::Io(std::io::Error::other(err)))?;
+            Event::Empty(ref e) => {
+                push_element(tracker, e, position, namespaces)?;
+                let echo = handle_empty(
+                    subtree_builder.as_mut(),
+                    tracker.matches(xpath),
+                    e,
+                    namespaces,
+                    |builder| {
+                        apply_transform(
+                            builder,
+                            &mut transform_fn,
+                            &mut xml_writer,
+                            &mut transform_count,
+                        )
+                    },
+                )?;
+                if echo {
+                    write_event(&mut xml_writer, Event::Empty(e.clone()))?;
                 }
-
                 tracker.pop_element();
             }
 
-            Ok(Event::End(ref e)) => {
-                if let Some(mut builder) = subtree_builder.take() {
-                    add_end_to_builder(&mut builder, e)?;
-
-                    if builder.is_complete() {
-                        let mut editable = builder.build()?;
-                        transform_fn(&mut editable);
-                        transform_count += 1;
-
-                        if !editable.is_removed() {
-                            serialize_editable(&editable, xml_writer.get_mut())?;
-                        }
-                    } else {
-                        subtree_builder = Some(builder);
-                    }
-                } else {
-                    xml_writer
-                        .write_event(Event::End(e.clone()))
-                        .map_err(|err| TransformError::Io(std::io::Error::other(err)))?;
-                }
-
-                tracker.pop_element();
+            Event::End(ref e) => {
+                let echo = subtree_builder.is_none();
+                subtree_builder = close_builder(subtree_builder.take(), e, |builder| {
+                    apply_transform(
+                        builder,
+                        &mut transform_fn,
+                        &mut xml_writer,
+                        &mut transform_count,
+                    )
+                })?;
+                finish_end(&mut xml_writer, tracker, e, echo)?;
             }
 
-            Ok(ref event @ Event::Text(_)) => {
+            ref event @ (Event::Text(_) | Event::CData(_) | Event::Comment(_)) => {
                 if let Some(ref mut builder) = subtree_builder {
-                    if let Event::Text(e) = event {
-                        let text = e
-                            .unescape()
-                            .map_err(|err| TransformError::XmlParse(err.to_string()))?;
-                        builder.text(&text);
-                    }
+                    add_content_to_builder(builder, event)?;
                 } else {
-                    xml_writer
-                        .write_event(event.clone())
-                        .map_err(|err| TransformError::Io(std::io::Error::other(err)))?;
+                    write_event(&mut xml_writer, event.clone())?;
                 }
             }
 
-            Ok(ref event @ Event::CData(_)) => {
-                if let Some(ref mut builder) = subtree_builder {
-                    if let Event::CData(e) = event {
-                        let text = std::str::from_utf8(e).map_err(TransformError::Utf8)?;
-                        builder.cdata(text);
-                    }
-                } else {
-                    xml_writer
-                        .write_event(event.clone())
-                        .map_err(|err| TransformError::Io(std::io::Error::other(err)))?;
-                }
-            }
-
-            Ok(ref event @ Event::Comment(_)) => {
-                if let Some(ref mut builder) = subtree_builder {
-                    if let Event::Comment(e) = event {
-                        let text = std::str::from_utf8(e).map_err(TransformError::Utf8)?;
-                        builder.comment(text);
-                    }
-                } else {
-                    xml_writer
-                        .write_event(event.clone())
-                        .map_err(|err| TransformError::Io(std::io::Error::other(err)))?;
-                }
-            }
-
-            Ok(Event::Eof) => {
-                break;
-            }
-
-            Ok(event) => {
+            event => {
                 // PI, Decl, DocType - pass through
-                xml_writer
-                    .write_event(event)
-                    .map_err(|err| TransformError::Io(std::io::Error::other(err)))?;
-            }
-
-            Err(e) => {
-                let byte_offset = xml_reader.buffer_position() as usize;
-                return Err(xml_parse_error_at_offset(
-                    format!("{:?}", e),
-                    byte_offset,
-                    Some(tracker.current_xpath()),
-                ));
+                write_event(&mut xml_writer, event)?;
             }
         }
 
-        buf.clear();
-    }
+        Ok(())
+    })?;
 
     Ok(transform_count)
 }
@@ -328,52 +373,40 @@ pub fn process_for_each_multi_from_reader<'a, R>(
 where
     R: BufRead,
 {
-    let mut xml_reader = Reader::from_reader(reader);
-    xml_reader.config_mut().trim_text(false);
-
-    let mut tracker = PathTracker::new();
     let mut match_count: usize = 0;
-    let mut buf = Vec::new();
 
     let mut states: Vec<HandlerState> = handlers
         .iter()
         .map(|(xpath, _)| HandlerState {
             xpath,
             builder: None,
-            match_context: None,
         })
         .collect();
 
-    loop {
-        let before_pos = xml_reader.buffer_position() as usize;
-
-        match xml_reader.read_event_into(&mut buf) {
-            Ok(Event::Start(e)) => {
-                let element_info = extract_element_info(&e, before_pos, namespaces)?;
-                tracker.push_element(element_info);
+    read_events(reader, |event, position, tracker| {
+        match event {
+            Event::Start(e) => {
+                push_element(tracker, &e, position, namespaces)?;
 
                 for i in 0..states.len() {
                     if let Some(ref mut builder) = states[i].builder {
                         add_start_to_builder(builder, &e, namespaces)?;
                     } else if tracker.matches(states[i].xpath) {
-                        let mut builder = EditableNodeBuilder::new();
-                        builder.set_namespaces(namespaces.clone());
+                        let mut builder = new_builder(namespaces);
                         add_start_to_builder(&mut builder, &e, namespaces)?;
                         states[i].builder = Some(builder);
                     }
                 }
             }
 
-            Ok(Event::Empty(e)) => {
-                let element_info = extract_element_info(&e, before_pos, namespaces)?;
-                tracker.push_element(element_info);
+            Event::Empty(e) => {
+                push_element(tracker, &e, position, namespaces)?;
 
                 for i in 0..states.len() {
                     if let Some(ref mut builder) = states[i].builder {
                         add_empty_to_builder(builder, &e, namespaces)?;
                     } else if tracker.matches(states[i].xpath) {
-                        let mut builder = EditableNodeBuilder::new();
-                        builder.set_namespaces(namespaces.clone());
+                        let mut builder = new_builder(namespaces);
                         add_empty_to_builder(&mut builder, &e, namespaces)?;
 
                         let mut editable = builder.build()?;
@@ -385,7 +418,7 @@ where
                 tracker.pop_element();
             }
 
-            Ok(Event::End(e)) => {
+            Event::End(e) => {
                 for i in 0..states.len() {
                     if let Some(mut builder) = states[i].builder.take() {
                         add_end_to_builder(&mut builder, &e)?;
@@ -403,53 +436,19 @@ where
                 tracker.pop_element();
             }
 
-            Ok(Event::Text(e)) => {
+            event @ (Event::Text(_) | Event::CData(_) | Event::Comment(_)) => {
                 for i in 0..states.len() {
                     if let Some(ref mut builder) = states[i].builder {
-                        let text = e
-                            .unescape()
-                            .map_err(|err| TransformError::XmlParse(err.to_string()))?;
-                        builder.text(&text);
+                        add_content_to_builder(builder, &event)?;
                     }
                 }
             }
 
-            Ok(Event::CData(e)) => {
-                for i in 0..states.len() {
-                    if let Some(ref mut builder) = states[i].builder {
-                        let text = std::str::from_utf8(&e).map_err(TransformError::Utf8)?;
-                        builder.cdata(text);
-                    }
-                }
-            }
-
-            Ok(Event::Comment(e)) => {
-                for i in 0..states.len() {
-                    if let Some(ref mut builder) = states[i].builder {
-                        let text = std::str::from_utf8(&e).map_err(TransformError::Utf8)?;
-                        builder.comment(text);
-                    }
-                }
-            }
-
-            Ok(Event::Eof) => {
-                break;
-            }
-
-            Ok(_) => {}
-
-            Err(e) => {
-                let byte_offset = xml_reader.buffer_position() as usize;
-                return Err(xml_parse_error_at_offset(
-                    format!("{:?}", e),
-                    byte_offset,
-                    Some(tracker.current_xpath()),
-                ));
-            }
+            _ => {}
         }
 
-        buf.clear();
-    }
+        Ok(())
+    })?;
 
     Ok(match_count)
 }
@@ -470,195 +469,97 @@ where
     R: BufRead,
     W: Write,
 {
-    let mut xml_reader = Reader::from_reader(reader);
-    xml_reader.config_mut().trim_text(false);
-
     let mut xml_writer = XmlWriter::new(writer);
-
-    let mut tracker = PathTracker::new();
     let mut transform_count: usize = 0;
-    let mut buf = Vec::new();
 
     let mut states: Vec<TransformHandlerState> = handlers
         .iter()
         .map(|(xpath, _)| TransformHandlerState {
             xpath,
             builder: None,
-            match_context: None,
-            match_start_offset: 0,
         })
         .collect();
 
     let mut active_handler: Option<usize> = None;
 
-    loop {
-        let before_pos = xml_reader.buffer_position() as usize;
+    read_events(reader, |event, position, tracker| {
+        match event {
+            Event::Start(ref e) => {
+                push_element(tracker, e, position, namespaces)?;
 
-        match xml_reader.read_event_into(&mut buf) {
-            Ok(Event::Start(ref e)) => {
-                let element_info = extract_element_info(e, before_pos, namespaces)?;
-                tracker.push_element(element_info);
-
-                if let Some(idx) = active_handler {
-                    if let Some(ref mut builder) = states[idx].builder {
-                        add_start_to_builder(builder, e, namespaces)?;
-                    }
+                if let Some(builder) = active_builder(&mut states, active_handler) {
+                    add_start_to_builder(builder, e, namespaces)?;
+                } else if let Some(index) = matching_handler(&states, tracker) {
+                    let mut builder = new_builder(namespaces);
+                    add_start_to_builder(&mut builder, e, namespaces)?;
+                    states[index].builder = Some(builder);
+                    active_handler = Some(index);
                 } else {
-                    let mut matched = false;
-                    for i in 0..states.len() {
-                        if tracker.matches(states[i].xpath) {
-                            let mut builder = EditableNodeBuilder::new();
-                            builder.set_namespaces(namespaces.clone());
-                            add_start_to_builder(&mut builder, e, namespaces)?;
-                            states[i].builder = Some(builder);
-                            states[i].match_start_offset = before_pos;
-                            active_handler = Some(i);
-                            matched = true;
-                            break;
-                        }
-                    }
-                    if !matched {
-                        xml_writer
-                            .write_event(Event::Start(e.clone()))
-                            .map_err(|err| TransformError::Io(std::io::Error::other(err)))?;
-                    }
+                    write_event(&mut xml_writer, Event::Start(e.clone()))?;
                 }
             }
 
-            Ok(Event::Empty(ref e)) => {
-                let element_info = extract_element_info(e, before_pos, namespaces)?;
-                tracker.push_element(element_info);
-
-                if let Some(idx) = active_handler {
-                    if let Some(ref mut builder) = states[idx].builder {
-                        add_empty_to_builder(builder, e, namespaces)?;
-                    }
-                } else {
-                    let mut matched = false;
-                    for i in 0..states.len() {
-                        if tracker.matches(states[i].xpath) {
-                            let mut builder = EditableNodeBuilder::new();
-                            builder.set_namespaces(namespaces.clone());
-                            add_empty_to_builder(&mut builder, e, namespaces)?;
-
-                            let mut editable = builder.build()?;
-                            handlers[i].1(&mut editable);
-                            transform_count += 1;
-
-                            if !editable.is_removed() {
-                                serialize_editable(&editable, xml_writer.get_mut())?;
-                            }
-                            matched = true;
-                            break;
-                        }
-                    }
-                    if !matched {
-                        xml_writer
-                            .write_event(Event::Empty(e.clone()))
-                            .map_err(|err| TransformError::Io(std::io::Error::other(err)))?;
-                    }
+            Event::Empty(ref e) => {
+                push_element(tracker, e, position, namespaces)?;
+                let match_index = active_handler
+                    .is_none()
+                    .then(|| matching_handler(&states, tracker))
+                    .flatten();
+                let echo = handle_empty(
+                    active_builder(&mut states, active_handler),
+                    match_index.is_some(),
+                    e,
+                    namespaces,
+                    |builder| {
+                        apply_transform(
+                            builder,
+                            &mut handlers[match_index.expect("matched handler")].1,
+                            &mut xml_writer,
+                            &mut transform_count,
+                        )
+                    },
+                )?;
+                if echo {
+                    write_event(&mut xml_writer, Event::Empty(e.clone()))?;
                 }
-
                 tracker.pop_element();
             }
 
-            Ok(Event::End(ref e)) => {
+            Event::End(ref e) => {
+                let echo = active_handler.is_none();
                 if let Some(idx) = active_handler {
-                    if let Some(mut builder) = states[idx].builder.take() {
-                        add_end_to_builder(&mut builder, e)?;
-
-                        if builder.is_complete() {
-                            let mut editable = builder.build()?;
-                            handlers[idx].1(&mut editable);
-                            transform_count += 1;
-
-                            if !editable.is_removed() {
-                                serialize_editable(&editable, xml_writer.get_mut())?;
-                            }
-
+                    states[idx].builder =
+                        close_builder(states[idx].builder.take(), e, |builder| {
+                            apply_transform(
+                                builder,
+                                &mut handlers[idx].1,
+                                &mut xml_writer,
+                                &mut transform_count,
+                            )?;
                             active_handler = None;
-                        } else {
-                            states[idx].builder = Some(builder);
-                        }
-                    }
-                } else {
-                    xml_writer
-                        .write_event(Event::End(e.clone()))
-                        .map_err(|err| TransformError::Io(std::io::Error::other(err)))?;
+                            Ok(())
+                        })?;
                 }
-
-                tracker.pop_element();
+                finish_end(&mut xml_writer, tracker, e, echo)?;
             }
 
-            Ok(ref event @ Event::Text(_)) => {
+            ref event @ (Event::Text(_) | Event::CData(_) | Event::Comment(_)) => {
                 if let Some(idx) = active_handler {
                     if let Some(ref mut builder) = states[idx].builder {
-                        if let Event::Text(e) = event {
-                            let text = e
-                                .unescape()
-                                .map_err(|err| TransformError::XmlParse(err.to_string()))?;
-                            builder.text(&text);
-                        }
+                        add_content_to_builder(builder, event)?;
                     }
                 } else {
-                    xml_writer
-                        .write_event(event.clone())
-                        .map_err(|err| TransformError::Io(std::io::Error::other(err)))?;
+                    write_event(&mut xml_writer, event.clone())?;
                 }
             }
 
-            Ok(ref event @ Event::CData(_)) => {
-                if let Some(idx) = active_handler {
-                    if let Some(ref mut builder) = states[idx].builder {
-                        if let Event::CData(e) = event {
-                            let text = std::str::from_utf8(e).map_err(TransformError::Utf8)?;
-                            builder.cdata(text);
-                        }
-                    }
-                } else {
-                    xml_writer
-                        .write_event(event.clone())
-                        .map_err(|err| TransformError::Io(std::io::Error::other(err)))?;
-                }
-            }
-
-            Ok(ref event @ Event::Comment(_)) => {
-                if let Some(idx) = active_handler {
-                    if let Some(ref mut builder) = states[idx].builder {
-                        if let Event::Comment(e) = event {
-                            let text = std::str::from_utf8(e).map_err(TransformError::Utf8)?;
-                            builder.comment(text);
-                        }
-                    }
-                } else {
-                    xml_writer
-                        .write_event(event.clone())
-                        .map_err(|err| TransformError::Io(std::io::Error::other(err)))?;
-                }
-            }
-
-            Ok(Event::Eof) => {
-                break;
-            }
-
-            Ok(event) => {
-                xml_writer
-                    .write_event(event)
-                    .map_err(|err| TransformError::Io(std::io::Error::other(err)))?;
-            }
-
-            Err(e) => {
-                let byte_offset = xml_reader.buffer_position() as usize;
-                return Err(xml_parse_error_at_offset(
-                    format!("{:?}", e),
-                    byte_offset,
-                    Some(tracker.current_xpath()),
-                ));
+            event => {
+                write_event(&mut xml_writer, event)?;
             }
         }
 
-        buf.clear();
-    }
+        Ok(())
+    })?;
 
     Ok(transform_count)
 }

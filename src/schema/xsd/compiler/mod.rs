@@ -38,6 +38,21 @@ pub struct XsdCompiler {
 }
 
 impl XsdCompiler {
+    fn target_namespace_prefix(&self, schema: &XsdSchema) -> Option<String> {
+        schema.target_namespace.as_ref().and_then(|namespace| {
+            schema
+                .namespace_bindings
+                .iter()
+                .find(|(prefix, uri)| !prefix.is_empty() && *uri == namespace)
+                .or_else(|| {
+                    self.namespace_bindings
+                        .iter()
+                        .find(|(prefix, uri)| !prefix.is_empty() && *uri == namespace)
+                })
+                .map(|(prefix, _)| prefix.clone())
+        })
+    }
+
     /// Creates a new compiler.
     pub fn new() -> Self {
         Self {
@@ -116,21 +131,7 @@ impl XsdCompiler {
         // First try the schema's OWN bindings (deterministic for each schema),
         // then fall back to accumulated bindings if needed (for schemas that don't
         // define a prefix for their own namespace, e.g., imported schemas)
-        let ns_prefix = schema.target_namespace.as_ref().and_then(|ns| {
-            // First: try schema's own bindings (non-empty prefix only)
-            schema
-                .namespace_bindings
-                .iter()
-                .find(|(k, v)| !k.is_empty() && *v == ns)
-                .map(|(k, _)| k.clone())
-                // Second: fall back to accumulated bindings (already populated)
-                .or_else(|| {
-                    self.namespace_bindings
-                        .iter()
-                        .find(|(k, v)| !k.is_empty() && *v == ns)
-                        .map(|(k, _)| k.clone())
-                })
-        });
+        let ns_prefix = self.target_namespace_prefix(schema);
 
         for type_def in &schema.types {
             if let Some(name) = type_def.name() {
@@ -186,21 +187,7 @@ impl XsdCompiler {
         // First try the schema's OWN bindings (deterministic for each schema),
         // then fall back to accumulated bindings if needed (for schemas that don't
         // define a prefix for their own namespace, e.g., imported schemas)
-        self.current_target_prefix = schema.target_namespace.as_ref().and_then(|ns| {
-            // First: try schema's own bindings (non-empty prefix only)
-            schema
-                .namespace_bindings
-                .iter()
-                .find(|(k, v)| !k.is_empty() && *v == ns)
-                .map(|(k, _)| k.clone())
-                // Second: fall back to accumulated bindings
-                .or_else(|| {
-                    self.namespace_bindings
-                        .iter()
-                        .find(|(k, v)| !k.is_empty() && *v == ns)
-                        .map(|(k, _)| k.clone())
-                })
-        });
+        self.current_target_prefix = self.target_namespace_prefix(&schema);
 
         // Set target namespace if this is the first schema with one
         if result.target_namespace.is_none() && schema.target_namespace.is_some() {

@@ -7,6 +7,74 @@ use super::XsdParser;
 use super::stack_frame::StackFrame;
 
 impl XsdParser {
+    fn nearest_complex_type(&mut self) -> Option<&mut XsdComplexType> {
+        self.stack.iter_mut().rev().find_map(|frame| match frame {
+            StackFrame::ComplexType(complex_type) => Some(complex_type),
+            _ => None,
+        })
+    }
+
+    fn finish_type_definition(&mut self, type_def: XsdTypeDef) {
+        match self.stack.last_mut() {
+            Some(StackFrame::Schema) | None => self.schema.types.push(type_def),
+            Some(StackFrame::Element(element)) => element.inline_type = Some(Box::new(type_def)),
+            _ => {}
+        }
+    }
+
+    fn finish_particle(
+        &mut self,
+        particle: XsdParticle,
+        nested_item: Option<fn(XsdParticle) -> XsdParticleItem>,
+    ) {
+        let Some(parent) = self.stack.last_mut() else {
+            return;
+        };
+        match parent {
+            StackFrame::ComplexType(complex_type) => {
+                complex_type.content = XsdComplexContent::Particle(particle);
+            }
+            StackFrame::Sequence(sequence) => {
+                if let Some(make_item) = nested_item {
+                    sequence.particles.push(make_item(particle));
+                }
+            }
+            StackFrame::Choice(choice) => {
+                if let Some(make_item) = nested_item {
+                    choice.particles.push(make_item(particle));
+                }
+            }
+            StackFrame::ComplexContentExtension(extension) => extension.particle = Some(particle),
+            StackFrame::ComplexContentRestriction(restriction) => {
+                restriction.particle = Some(particle)
+            }
+            StackFrame::Group(group) => group.particle = Some(particle),
+            _ => {}
+        }
+    }
+
+    fn finish_simple_content(&mut self, derivation: XsdSimpleContentDerivation) {
+        if let Some(complex_type) = self.nearest_complex_type() {
+            complex_type.content =
+                XsdComplexContent::SimpleContent(XsdSimpleContentDef { derivation });
+        }
+    }
+
+    fn finish_complex_derivation(&mut self, derivation: XsdComplexContentDerivation) {
+        if let Some(complex_type) = self.nearest_complex_type() {
+            complex_type.content = XsdComplexContent::ComplexContent(XsdComplexContentDef {
+                mixed: complex_type.mixed,
+                derivation,
+            });
+        }
+    }
+
+    fn finish_simple_type_content(&mut self, content: XsdSimpleTypeContent) {
+        if let Some(StackFrame::SimpleType(simple_type)) = self.stack.last_mut() {
+            simple_type.content = content;
+        }
+    }
+
     pub(super) fn finish_element(&mut self, elem: XsdElement) -> Result<()> {
         // Find parent context
         if let Some(parent) = self.stack.last_mut() {
@@ -57,151 +125,60 @@ impl XsdParser {
     }
 
     pub(super) fn finish_complex_type(&mut self, ct: XsdComplexType) -> Result<()> {
-        let type_def = XsdTypeDef::Complex(ct);
-
-        if let Some(parent) = self.stack.last_mut() {
-            match parent {
-                StackFrame::Schema => {
-                    self.schema.types.push(type_def);
-                }
-                StackFrame::Element(elem) => {
-                    elem.inline_type = Some(Box::new(type_def));
-                }
-                _ => {}
-            }
-        } else {
-            self.schema.types.push(type_def);
-        }
+        self.finish_type_definition(XsdTypeDef::Complex(ct));
         Ok(())
     }
 
     pub(super) fn finish_simple_type(&mut self, st: XsdSimpleType) -> Result<()> {
-        let type_def = XsdTypeDef::Simple(st.clone());
-
         if let Some(parent) = self.stack.last_mut() {
             match parent {
-                StackFrame::Schema => {
-                    self.schema.types.push(type_def);
-                }
-                StackFrame::Element(elem) => {
-                    elem.inline_type = Some(Box::new(type_def));
-                }
                 StackFrame::Attribute(attr) => {
                     attr.inline_type = Some(st);
+                    return Ok(());
                 }
                 StackFrame::SimpleRestriction(r) => {
                     r.inline_base = Some(Box::new(st));
+                    return Ok(());
                 }
                 StackFrame::SimpleList(list) => {
                     list.inline_type = Some(Box::new(st));
+                    return Ok(());
                 }
                 StackFrame::SimpleUnion(union) => {
                     union.inline_types.push(st);
+                    return Ok(());
                 }
                 _ => {}
             }
-        } else {
-            self.schema.types.push(type_def);
         }
+        self.finish_type_definition(XsdTypeDef::Simple(st));
         Ok(())
     }
 
     pub(super) fn finish_sequence(&mut self, seq: XsdSequence) -> Result<()> {
-        let particle = XsdParticle::Sequence(seq);
-
-        if let Some(parent) = self.stack.last_mut() {
-            match parent {
-                StackFrame::ComplexType(ct) => {
-                    ct.content = XsdComplexContent::Particle(particle);
-                }
-                StackFrame::Sequence(parent_seq) => {
-                    parent_seq
-                        .particles
-                        .push(XsdParticleItem::Sequence(match particle {
-                            XsdParticle::Sequence(s) => s,
-                            _ => unreachable!(),
-                        }));
-                }
-                StackFrame::Choice(choice) => {
-                    choice
-                        .particles
-                        .push(XsdParticleItem::Sequence(match particle {
-                            XsdParticle::Sequence(s) => s,
-                            _ => unreachable!(),
-                        }));
-                }
-                StackFrame::ComplexContentExtension(ext) => {
-                    ext.particle = Some(particle);
-                }
-                StackFrame::ComplexContentRestriction(r) => {
-                    r.particle = Some(particle);
-                }
-                StackFrame::Group(grp) => {
-                    grp.particle = Some(particle);
-                }
-                _ => {}
-            }
-        }
+        self.finish_particle(
+            XsdParticle::Sequence(seq),
+            Some(|particle| match particle {
+                XsdParticle::Sequence(sequence) => XsdParticleItem::Sequence(sequence),
+                _ => unreachable!(),
+            }),
+        );
         Ok(())
     }
 
     pub(super) fn finish_choice(&mut self, choice: XsdChoice) -> Result<()> {
-        let particle = XsdParticle::Choice(choice);
-
-        if let Some(parent) = self.stack.last_mut() {
-            match parent {
-                StackFrame::ComplexType(ct) => {
-                    ct.content = XsdComplexContent::Particle(particle);
-                }
-                StackFrame::Sequence(seq) => {
-                    seq.particles.push(XsdParticleItem::Choice(match particle {
-                        XsdParticle::Choice(c) => c,
-                        _ => unreachable!(),
-                    }));
-                }
-                StackFrame::Choice(parent_choice) => {
-                    parent_choice
-                        .particles
-                        .push(XsdParticleItem::Choice(match particle {
-                            XsdParticle::Choice(c) => c,
-                            _ => unreachable!(),
-                        }));
-                }
-                StackFrame::ComplexContentExtension(ext) => {
-                    ext.particle = Some(particle);
-                }
-                StackFrame::ComplexContentRestriction(r) => {
-                    r.particle = Some(particle);
-                }
-                StackFrame::Group(grp) => {
-                    grp.particle = Some(particle);
-                }
-                _ => {}
-            }
-        }
+        self.finish_particle(
+            XsdParticle::Choice(choice),
+            Some(|particle| match particle {
+                XsdParticle::Choice(choice) => XsdParticleItem::Choice(choice),
+                _ => unreachable!(),
+            }),
+        );
         Ok(())
     }
 
     pub(super) fn finish_all(&mut self, all: XsdAll) -> Result<()> {
-        let particle = XsdParticle::All(all);
-
-        if let Some(parent) = self.stack.last_mut() {
-            match parent {
-                StackFrame::ComplexType(ct) => {
-                    ct.content = XsdComplexContent::Particle(particle);
-                }
-                StackFrame::ComplexContentExtension(ext) => {
-                    ext.particle = Some(particle);
-                }
-                StackFrame::ComplexContentRestriction(r) => {
-                    r.particle = Some(particle);
-                }
-                StackFrame::Group(grp) => {
-                    grp.particle = Some(particle);
-                }
-                _ => {}
-            }
-        }
+        self.finish_particle(XsdParticle::All(all), None);
         Ok(())
     }
 
@@ -337,15 +314,7 @@ impl XsdParser {
         &mut self,
         ext: XsdSimpleContentExtension,
     ) -> Result<()> {
-        // Find the parent complexType or simpleContent
-        for frame in self.stack.iter_mut().rev() {
-            if let StackFrame::ComplexType(ct) = frame {
-                ct.content = XsdComplexContent::SimpleContent(XsdSimpleContentDef {
-                    derivation: XsdSimpleContentDerivation::Extension(ext),
-                });
-                break;
-            }
-        }
+        self.finish_simple_content(XsdSimpleContentDerivation::Extension(ext));
         Ok(())
     }
 
@@ -353,14 +322,7 @@ impl XsdParser {
         &mut self,
         r: XsdSimpleContentRestriction,
     ) -> Result<()> {
-        for frame in self.stack.iter_mut().rev() {
-            if let StackFrame::ComplexType(ct) = frame {
-                ct.content = XsdComplexContent::SimpleContent(XsdSimpleContentDef {
-                    derivation: XsdSimpleContentDerivation::Restriction(r),
-                });
-                break;
-            }
-        }
+        self.finish_simple_content(XsdSimpleContentDerivation::Restriction(r));
         Ok(())
     }
 
@@ -381,15 +343,7 @@ impl XsdParser {
         &mut self,
         ext: XsdComplexContentExtension,
     ) -> Result<()> {
-        for frame in self.stack.iter_mut().rev() {
-            if let StackFrame::ComplexType(ct) = frame {
-                ct.content = XsdComplexContent::ComplexContent(XsdComplexContentDef {
-                    mixed: ct.mixed,
-                    derivation: XsdComplexContentDerivation::Extension(ext),
-                });
-                break;
-            }
-        }
+        self.finish_complex_derivation(XsdComplexContentDerivation::Extension(ext));
         Ok(())
     }
 
@@ -397,33 +351,17 @@ impl XsdParser {
         &mut self,
         r: XsdComplexContentRestriction,
     ) -> Result<()> {
-        for frame in self.stack.iter_mut().rev() {
-            if let StackFrame::ComplexType(ct) = frame {
-                ct.content = XsdComplexContent::ComplexContent(XsdComplexContentDef {
-                    mixed: ct.mixed,
-                    derivation: XsdComplexContentDerivation::Restriction(r),
-                });
-                break;
-            }
-        }
+        self.finish_complex_derivation(XsdComplexContentDerivation::Restriction(r));
         Ok(())
     }
 
     pub(super) fn finish_simple_list(&mut self, list: XsdSimpleList) -> Result<()> {
-        if let Some(parent) = self.stack.last_mut() {
-            if let StackFrame::SimpleType(st) = parent {
-                st.content = XsdSimpleTypeContent::List(list);
-            }
-        }
+        self.finish_simple_type_content(XsdSimpleTypeContent::List(list));
         Ok(())
     }
 
     pub(super) fn finish_simple_union(&mut self, union: XsdSimpleUnion) -> Result<()> {
-        if let Some(parent) = self.stack.last_mut() {
-            if let StackFrame::SimpleType(st) = parent {
-                st.content = XsdSimpleTypeContent::Union(union);
-            }
-        }
+        self.finish_simple_type_content(XsdSimpleTypeContent::Union(union));
         Ok(())
     }
 

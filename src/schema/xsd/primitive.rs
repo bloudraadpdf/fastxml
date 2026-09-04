@@ -10,7 +10,7 @@
 
 use std::sync::OnceLock;
 
-use regex::Regex;
+use regex::{Captures, Regex};
 
 use crate::schema::types::{CompiledSchema, SimpleType, TypeDef};
 
@@ -424,6 +424,27 @@ fn validate_signed_integer(
 // Date / time validators
 // ---------------------------------------------------------------------------
 
+fn parse_year(
+    captures: &Captures<'_>,
+    kind: &'static str,
+    value: &str,
+) -> Result<i64, PrimitiveError> {
+    let magnitude: i64 =
+        captures
+            .get(2)
+            .unwrap()
+            .as_str()
+            .parse()
+            .map_err(|_| PrimitiveError::InvalidLexical {
+                kind,
+                value: value.to_string(),
+            })?;
+    let negative = captures
+        .get(1)
+        .is_some_and(|sign| !sign.as_str().is_empty());
+    Ok(if negative { -magnitude } else { magnitude })
+}
+
 fn validate_date(v: &str) -> Result<(), PrimitiveError> {
     let caps = date_regex()
         .captures(v)
@@ -431,17 +452,7 @@ fn validate_date(v: &str) -> Result<(), PrimitiveError> {
             kind: "date",
             value: v.to_string(),
         })?;
-    let sign_neg = !caps.get(1).map(|m| m.as_str()).unwrap_or("").is_empty();
-    let year: i64 =
-        caps.get(2)
-            .unwrap()
-            .as_str()
-            .parse()
-            .map_err(|_| PrimitiveError::InvalidLexical {
-                kind: "date",
-                value: v.to_string(),
-            })?;
-    let year = if sign_neg { -year } else { year };
+    let year = parse_year(&caps, "date", v)?;
     let month: u32 = caps.get(3).unwrap().as_str().parse().unwrap();
     let day: u32 = caps.get(4).unwrap().as_str().parse().unwrap();
 
@@ -462,15 +473,7 @@ fn validate_gyear(v: &str) -> Result<(), PrimitiveError> {
     // We only need to confirm the year is parseable; XSD 1.0 disallows year 0
     // but tests don't exercise that and we'd risk false negatives on data
     // that downstream consumers accept.
-    let _year: i64 =
-        caps.get(2)
-            .unwrap()
-            .as_str()
-            .parse()
-            .map_err(|_| PrimitiveError::InvalidLexical {
-                kind: "gYear",
-                value: v.to_string(),
-            })?;
+    let _year = parse_year(&caps, "gYear", v)?;
     if let Some(tz) = caps.get(3) {
         validate_timezone(tz.as_str(), v)?;
     }
@@ -484,17 +487,7 @@ fn validate_datetime(v: &str) -> Result<(), PrimitiveError> {
             kind: "dateTime",
             value: v.to_string(),
         })?;
-    let sign_neg = !caps.get(1).map(|m| m.as_str()).unwrap_or("").is_empty();
-    let year: i64 =
-        caps.get(2)
-            .unwrap()
-            .as_str()
-            .parse()
-            .map_err(|_| PrimitiveError::InvalidLexical {
-                kind: "dateTime",
-                value: v.to_string(),
-            })?;
-    let year = if sign_neg { -year } else { year };
+    let year = parse_year(&caps, "dateTime", v)?;
     let month: u32 = caps.get(3).unwrap().as_str().parse().unwrap();
     let day: u32 = caps.get(4).unwrap().as_str().parse().unwrap();
     let hour: u32 = caps.get(5).unwrap().as_str().parse().unwrap();

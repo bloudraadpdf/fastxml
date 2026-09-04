@@ -8,6 +8,22 @@ use crate::node::XmlNode;
 use crate::xpath::error::XPathEvalError;
 use crate::xpath::types::{EvaluationContext, XPathValue};
 
+pub(super) fn require_arguments(
+    args: &[XPathValue],
+    function: &str,
+    expected: usize,
+) -> Result<()> {
+    if args.len() == expected {
+        return Ok(());
+    }
+    Err(XPathEvalError::WrongArgumentCount {
+        function: function.to_string(),
+        expected: expected.to_string(),
+        found: args.len(),
+    }
+    .into())
+}
+
 /// `text()` - returns the text content of the context node.
 /// (Usually handled as a node test, but can be called as function)
 pub fn fn_text(args: Vec<XPathValue>, ctx: &EvaluationContext<'_>) -> Result<XPathValue> {
@@ -53,23 +69,8 @@ pub fn get_first_node_or_context(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::document::XmlDocument;
-    use crate::namespace::NamespaceResolver;
     use crate::xpath::functions::evaluate_function;
-
-    fn create_test_document() -> XmlDocument {
-        crate::parse(
-            "<root><item id=\"1\">10</item><item id=\"2\">20</item><item id=\"3\">30</item></root>",
-        )
-        .unwrap()
-    }
-
-    fn create_context<'a>(
-        doc: &'a XmlDocument,
-        node: &crate::node::XmlNode,
-    ) -> EvaluationContext<'a> {
-        EvaluationContext::new(node.clone(), doc, NamespaceResolver::new())
-    }
+    use crate::xpath::functions::test_support::{create_context, create_test_document};
 
     #[test]
     fn test_fn_text() {

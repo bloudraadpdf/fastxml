@@ -63,6 +63,11 @@ pub struct Validator<'a> {
     max_errors: Option<usize>,
 }
 
+enum PreparedValidation<'a> {
+    Complete(Vec<StructuredError>),
+    ResolveLocation(Source<'a>),
+}
+
 impl<'a> From<&'a XmlDocument> for Validator<'a> {
     fn from(doc: &'a XmlDocument) -> Self {
         Self::with_source(Source::Dom(doc))
@@ -120,6 +125,21 @@ impl<'a> Validator<'a> {
         self
     }
 
+    fn prepare(self) -> Result<PreparedValidation<'a>> {
+        let Self {
+            source,
+            schema,
+            mode,
+            max_errors,
+        } = self;
+        match schema {
+            Some(schema) => Ok(PreparedValidation::Complete(validate_with_schema(
+                source, schema, mode, max_errors,
+            )?)),
+            None => Ok(PreparedValidation::ResolveLocation(source)),
+        }
+    }
+
     /// Runs validation and returns a [`Report`].
     ///
     /// With an explicit [`schema`](Self::schema), this never touches the
@@ -127,15 +147,9 @@ impl<'a> Validator<'a> {
     /// using the default fetcher, which requires the `ureq` feature — without
     /// it, use [`run_with`](Self::run_with) and pass a fetcher.
     pub fn run(self) -> Result<Report> {
-        let Self {
-            source,
-            schema,
-            mode,
-            max_errors,
-        } = self;
-        let entries = match schema {
-            Some(schema) => validate_with_schema(source, schema, mode, max_errors)?,
-            None => run_location_default(source)?,
+        let entries = match self.prepare()? {
+            PreparedValidation::Complete(entries) => entries,
+            PreparedValidation::ResolveLocation(source) => run_location_default(source)?,
         };
         Ok(Report::new(entries))
     }
@@ -144,15 +158,9 @@ impl<'a> Validator<'a> {
     ///
     /// When an explicit [`schema`](Self::schema) is set the fetcher is unused.
     pub fn run_with<F: SchemaFetcher + 'static>(self, fetcher: F) -> Result<Report> {
-        let Self {
-            source,
-            schema,
-            mode,
-            max_errors,
-        } = self;
-        let entries = match schema {
-            Some(schema) => validate_with_schema(source, schema, mode, max_errors)?,
-            None => match source {
+        let entries = match self.prepare()? {
+            PreparedValidation::Complete(entries) => entries,
+            PreparedValidation::ResolveLocation(source) => match source {
                 Source::Dom(doc) => {
                     super::api::validate_with_schema_location_and_fetcher(doc, &fetcher)?
                 }
@@ -180,15 +188,9 @@ impl<'a> Validator<'a> {
         self,
         fetcher: &F,
     ) -> Result<Report> {
-        let Self {
-            source,
-            schema,
-            mode,
-            max_errors,
-        } = self;
-        let entries = match schema {
-            Some(schema) => validate_with_schema(source, schema, mode, max_errors)?,
-            None => match source {
+        let entries = match self.prepare()? {
+            PreparedValidation::Complete(entries) => entries,
+            PreparedValidation::ResolveLocation(source) => match source {
                 Source::Dom(doc) => {
                     super::api::validate_with_schema_location_with_async_fetcher(doc, fetcher)
                         .await?

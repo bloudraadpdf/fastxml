@@ -2,6 +2,8 @@
 
 use std::io::Read;
 
+use ureq::ResponseExt as _;
+
 use super::error::FetchError;
 use crate::error::Result;
 
@@ -46,10 +48,13 @@ impl UreqFetcher {
     }
 
     fn build_agent(&self) -> ureq::Agent {
-        ureq::AgentBuilder::new()
-            .timeout(std::time::Duration::from_secs(self.timeout_secs))
-            .redirects(self.max_redirects)
+        ureq::Agent::config_builder()
+            .timeout_global(Some(std::time::Duration::from_secs(self.timeout_secs)))
+            .max_redirects(self.max_redirects)
+            .user_agent(self.user_agent.as_str())
+            .http_status_as_error(false)
             .build()
+            .into()
     }
 }
 
@@ -63,20 +68,19 @@ impl SchemaFetcher for UreqFetcher {
     fn fetch(&self, url: &str) -> Result<FetchResult> {
         let agent = self.build_agent();
 
-        let response = agent
+        let mut response = agent
             .get(url)
-            .set("User-Agent", &self.user_agent)
             .call()
             .map_err(|e| FetchError::RequestFailed {
                 url: url.to_string(),
                 message: e.to_string(),
             })?;
 
-        let status = response.status();
-        let final_url = response.get_url().to_string();
+        let status = response.status().as_u16();
+        let final_url = response.get_uri().to_string();
         let redirected = final_url != url;
 
-        if status != 200 {
+        if !response.status().is_success() {
             return Err(FetchError::HttpError {
                 status,
                 url: url.to_string(),
@@ -87,7 +91,8 @@ impl SchemaFetcher for UreqFetcher {
         // Read content
         let mut content = Vec::new();
         response
-            .into_reader()
+            .body_mut()
+            .as_reader()
             .read_to_end(&mut content)
             .map_err(|e| FetchError::ReadResponseFailed {
                 message: e.to_string(),

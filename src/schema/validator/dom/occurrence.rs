@@ -77,10 +77,7 @@ impl DomSchemaValidator {
                             node,
                         )
                         .with_node_name(&node_name)
-                        .with_expected(format!(
-                            "at least {} occurrence(s) of '{}'",
-                            min_occurs, child_name
-                        ))
+                        .with_expected(format!("at least {} occurrence(s) of '{}'", min_occurs, child_name))
                         .with_found(format!("{} occurrence(s)", actual_count))
                         .with_level(ErrorLevel::Error);
 

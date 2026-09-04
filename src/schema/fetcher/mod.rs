@@ -53,6 +53,7 @@ mod cache;
 mod combined;
 mod file;
 mod file_cache;
+mod file_common;
 mod noop;
 mod result;
 mod traits;
@@ -96,6 +97,83 @@ pub use self::reqwest::ReqwestFetcher;
 
 #[cfg(feature = "ureq")]
 pub use self::ureq::UreqFetcher;
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    use super::{FetchResult, SchemaFetcher};
+    use crate::error::Result;
+
+    fn response_for(responses: &HashMap<String, Vec<u8>>, url: &str) -> Result<FetchResult> {
+        let content =
+            responses
+                .get(url)
+                .ok_or_else(|| super::error::FetchError::RequestFailed {
+                    url: url.to_string(),
+                    message: "Not found".to_string(),
+                })?;
+        Ok(FetchResult {
+            content: content.clone(),
+            final_url: url.to_string(),
+            redirected: false,
+        })
+    }
+
+    pub(crate) struct TrackingFetcher {
+        responses: HashMap<String, Vec<u8>>,
+        calls: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl TrackingFetcher {
+        pub(crate) fn new(responses: HashMap<String, Vec<u8>>) -> Self {
+            Self {
+                responses,
+                calls: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        pub(crate) fn call_count(&self) -> usize {
+            self.calls.lock().unwrap().len()
+        }
+    }
+
+    impl SchemaFetcher for TrackingFetcher {
+        fn fetch(&self, url: &str) -> Result<FetchResult> {
+            self.calls.lock().unwrap().push(url.to_string());
+            response_for(&self.responses, url)
+        }
+    }
+
+    #[cfg(feature = "tokio")]
+    pub(crate) struct AsyncTrackingFetcher {
+        responses: Arc<parking_lot::RwLock<HashMap<String, Vec<u8>>>>,
+    }
+
+    #[cfg(feature = "tokio")]
+    impl AsyncTrackingFetcher {
+        pub(crate) fn new() -> Self {
+            Self {
+                responses: Arc::new(parking_lot::RwLock::new(HashMap::new())),
+            }
+        }
+
+        pub(crate) fn add_response(&self, url: &str, content: &[u8]) {
+            self.responses
+                .write()
+                .insert(url.to_string(), content.to_vec());
+        }
+    }
+
+    #[cfg(feature = "tokio")]
+    #[async_trait::async_trait]
+    impl super::AsyncSchemaFetcher for AsyncTrackingFetcher {
+        async fn fetch(&self, url: &str) -> Result<FetchResult> {
+            response_for(&self.responses.read(), url)
+        }
+    }
+}
 
 use dashmap::DashMap;
 use std::path::Path;

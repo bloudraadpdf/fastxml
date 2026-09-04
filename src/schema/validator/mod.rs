@@ -19,6 +19,7 @@ mod context;
 mod dom;
 mod facade;
 mod lazy;
+mod lookup;
 mod state;
 mod streaming;
 

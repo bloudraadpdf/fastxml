@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use crate::document::XmlDocument;
+use crate::error::StructuredError;
 use crate::parse;
 use crate::schema::types::{CompiledSchema, ComplexType, ContentModel, ElementDef, TypeDef};
 
@@ -13,28 +14,55 @@ fn create_test_doc(xml: &str) -> XmlDocument {
     parse(xml.as_bytes()).unwrap()
 }
 
+fn validate_with(
+    xml: &str,
+    schema: CompiledSchema,
+    configure: impl FnOnce(DomSchemaValidator) -> DomSchemaValidator,
+) -> Vec<StructuredError> {
+    let doc = create_test_doc(xml);
+    configure(DomSchemaValidator::new(Arc::new(schema)))
+        .validate(&doc)
+        .unwrap()
+}
+
+fn parent_sequence_schema(element: ElementDef) -> CompiledSchema {
+    let mut schema = CompiledSchema::new();
+    let complex_type = ComplexType {
+        name: "ParentType".to_string(),
+        base_type: None,
+        content: ContentModel::Sequence(vec![element]),
+        attributes: Vec::new(),
+        is_abstract: false,
+        mixed: false,
+    };
+    schema.elements.insert(
+        "parent".to_string(),
+        ElementDef::new("parent").with_type("ParentType"),
+    );
+    schema
+        .types
+        .insert("ParentType".to_string(), TypeDef::Complex(complex_type));
+    schema
+}
+
 #[test]
 fn test_dom_validator_empty_schema() {
-    let doc = create_test_doc("<root><child/></root>");
-    let schema = CompiledSchema::new();
-    let validator = DomSchemaValidator::new(Arc::new(schema));
-
-    let errors = validator.validate(&doc).unwrap();
+    let errors = validate_with(
+        "<root><child/></root>",
+        CompiledSchema::new(),
+        |validator| validator,
+    );
     // Empty schema should not produce errors
     assert!(errors.is_empty());
 }
 
 #[test]
 fn test_dom_validator_unknown_element_strict() {
-    let doc = create_test_doc("<unknown/>");
-
     let mut schema = CompiledSchema::new();
     schema
         .elements
         .insert("known".to_string(), ElementDef::new("known"));
-
-    let validator = DomSchemaValidator::new(Arc::new(schema));
-    let errors = validator.validate(&doc).unwrap();
+    let errors = validate_with("<unknown/>", schema, |validator| validator);
 
     assert!(!errors.is_empty());
     assert!(errors[0].message.contains("unknown"));
@@ -42,47 +70,21 @@ fn test_dom_validator_unknown_element_strict() {
 
 #[test]
 fn test_dom_validator_unknown_element_lenient() {
-    let doc = create_test_doc("<unknown/>");
-
     let mut schema = CompiledSchema::new();
     schema
         .elements
         .insert("known".to_string(), ElementDef::new("known"));
-
-    let validator = DomSchemaValidator::new(Arc::new(schema)).with_mode(ValidationMode::Lenient);
-    let errors = validator.validate(&doc).unwrap();
+    let errors = validate_with("<unknown/>", schema, |validator| {
+        validator.with_mode(ValidationMode::Lenient)
+    });
 
     assert!(errors.is_empty());
 }
 
 #[test]
 fn test_dom_validator_min_occurs() {
-    let doc = create_test_doc("<parent></parent>");
-
-    let mut schema = CompiledSchema::new();
-
-    let complex_type = ComplexType {
-        name: "ParentType".to_string(),
-        base_type: None,
-        content: ContentModel::Sequence(vec![
-            ElementDef::new("required_child").with_occurs(1, Some(1)),
-        ]),
-        attributes: Vec::new(),
-        is_abstract: false,
-        mixed: false,
-    };
-
-    schema.elements.insert(
-        "parent".to_string(),
-        ElementDef::new("parent").with_type("ParentType"),
-    );
-
-    schema
-        .types
-        .insert("ParentType".to_string(), TypeDef::Complex(complex_type));
-
-    let validator = DomSchemaValidator::new(Arc::new(schema));
-    let errors = validator.validate(&doc).unwrap();
+    let schema = parent_sequence_schema(ElementDef::new("required_child").with_occurs(1, Some(1)));
+    let errors = validate_with("<parent></parent>", schema, |validator| validator);
 
     assert!(!errors.is_empty());
     assert!(errors[0].message.contains("required_child"));
@@ -90,35 +92,18 @@ fn test_dom_validator_min_occurs() {
 
 #[test]
 fn test_dom_validator_max_occurs() {
-    let doc = create_test_doc("<parent><child/><child/><child/></parent>");
-
-    let mut schema = CompiledSchema::new();
-
-    let complex_type = ComplexType {
-        name: "ParentType".to_string(),
-        base_type: None,
-        content: ContentModel::Sequence(vec![ElementDef::new("child").with_occurs(0, Some(2))]),
-        attributes: Vec::new(),
-        is_abstract: false,
-        mixed: false,
-    };
-
-    schema.elements.insert(
-        "parent".to_string(),
-        ElementDef::new("parent").with_type("ParentType"),
-    );
-
-    schema
-        .types
-        .insert("ParentType".to_string(), TypeDef::Complex(complex_type));
+    let mut schema = parent_sequence_schema(ElementDef::new("child").with_occurs(0, Some(2)));
 
     // Also define child as global element
     schema
         .elements
         .insert("child".to_string(), ElementDef::new("child"));
 
-    let validator = DomSchemaValidator::new(Arc::new(schema));
-    let errors = validator.validate(&doc).unwrap();
+    let errors = validate_with(
+        "<parent><child/><child/><child/></parent>",
+        schema,
+        |validator| validator,
+    );
 
     assert!(!errors.is_empty());
     assert!(errors[0].message.contains("maximum"));
@@ -126,8 +111,6 @@ fn test_dom_validator_max_occurs() {
 
 #[test]
 fn test_dom_validator_choice_content_model() {
-    let doc = create_test_doc("<boundedBy><Envelope/></boundedBy>");
-
     let mut schema = CompiledSchema::new();
 
     let mut choice_type = ComplexType::new("BoundingShapeType");
@@ -152,8 +135,9 @@ fn test_dom_validator_choice_content_model() {
         .elements
         .insert("Null".to_string(), ElementDef::new("Null"));
 
-    let validator = DomSchemaValidator::new(Arc::new(schema));
-    let errors = validator.validate(&doc).unwrap();
+    let errors = validate_with("<boundedBy><Envelope/></boundedBy>", schema, |validator| {
+        validator
+    });
 
     // Choice should accept one of the options
     assert!(errors.is_empty());
@@ -161,8 +145,6 @@ fn test_dom_validator_choice_content_model() {
 
 #[test]
 fn test_dom_validator_substitution_group() {
-    let doc = create_test_doc("<parent><ReliefFeature/></parent>");
-
     let mut schema = CompiledSchema::new();
 
     // Parent type expects _CityObject
@@ -209,8 +191,9 @@ fn test_dom_validator_substitution_group() {
         Arc::new(vec!["ReliefFeature".to_string()]),
     );
 
-    let validator = DomSchemaValidator::new(Arc::new(schema));
-    let errors = validator.validate(&doc).unwrap();
+    let errors = validate_with("<parent><ReliefFeature/></parent>", schema, |validator| {
+        validator
+    });
 
     // ReliefFeature should count toward _CityObject requirement
     assert!(
@@ -222,16 +205,15 @@ fn test_dom_validator_substitution_group() {
 
 #[test]
 fn test_dom_validator_with_max_errors() {
-    let doc = create_test_doc("<root><a/><b/><c/><d/><e/></root>");
-
     let mut schema = CompiledSchema::new();
     schema
         .elements
         .insert("root".to_string(), ElementDef::new("root"));
     // Only root is known, all children are unknown
 
-    let validator = DomSchemaValidator::new(Arc::new(schema)).with_max_errors(2);
-    let errors = validator.validate(&doc).unwrap();
+    let errors = validate_with("<root><a/><b/><c/><d/><e/></root>", schema, |validator| {
+        validator.with_max_errors(2)
+    });
 
     // Should stop at 2 errors
     assert_eq!(errors.len(), 2);
@@ -239,8 +221,6 @@ fn test_dom_validator_with_max_errors() {
 
 #[test]
 fn test_dom_validator_type_inheritance() {
-    let doc = create_test_doc("<root><baseElement>content</baseElement></root>");
-
     let mut schema = CompiledSchema::new();
 
     // BaseType with "baseElement"
@@ -273,8 +253,11 @@ fn test_dom_validator_type_inheritance() {
         ElementDef::new("baseElement").with_type("xs:string"),
     );
 
-    let validator = DomSchemaValidator::new(Arc::new(schema));
-    let errors = validator.validate(&doc).unwrap();
+    let errors = validate_with(
+        "<root><baseElement>content</baseElement></root>",
+        schema,
+        |validator| validator,
+    );
 
     // Should recognize inherited element
     assert!(

@@ -342,14 +342,18 @@ fn fetch_url(url: &str, args: &Args) -> Result<(Vec<u8>, u64), Box<dyn std::erro
         println!("  Downloading: {}", url);
     }
 
-    let response = ureq::get(url)
-        .set("Accept-Encoding", "gzip")
+    let mut response = ureq::get(url)
+        .header("Accept-Encoding", "gzip")
         .call()
         .map_err(|e| format!("Failed to fetch URL {}: {}", url, e))?;
 
-    let content_encoding = response.header("Content-Encoding").map(|s| s.to_string());
+    let content_encoding = response
+        .headers()
+        .get("Content-Encoding")
+        .and_then(|s| s.to_str().ok())
+        .map(str::to_owned);
     let mut content = Vec::new();
-    response.into_reader().read_to_end(&mut content)?;
+    response.body_mut().as_reader().read_to_end(&mut content)?;
 
     // Handle gzip decompression if needed
     let is_gzip = content_encoding

@@ -2,10 +2,9 @@
 
 use std::sync::Arc;
 
-use crate::schema::types::{
-    ComplexType, ContentModel, ContentModelType, ElementDef, FlattenedChildren, TypeDef,
-};
+use crate::schema::types::{ElementDef, FlattenedChildren, TypeDef};
 
+use super::super::lookup::flatten_complex_type;
 use super::DomSchemaValidator;
 
 impl DomSchemaValidator {
@@ -49,84 +48,17 @@ impl DomSchemaValidator {
 
             // Compute at runtime if not cached
             if let Some(TypeDef::Complex(complex)) = self.schema.get_type(type_ref) {
-                return Some(Arc::new(self.compute_flattened_children(complex)));
+                return Some(Arc::new(flatten_complex_type(&self.schema, complex)));
             }
         }
 
         // Try inline type
         if let Some(ref inline_type) = elem.inline_type {
             if let TypeDef::Complex(complex) = inline_type {
-                return Some(Arc::new(self.compute_flattened_children(complex)));
+                return Some(Arc::new(flatten_complex_type(&self.schema, complex)));
             }
         }
 
         None
-    }
-
-    /// Computes flattened children for a complex type.
-    pub(crate) fn compute_flattened_children(&self, complex: &ComplexType) -> FlattenedChildren {
-        let content_model_type = match &complex.content {
-            ContentModel::Sequence(_) => ContentModelType::Sequence,
-            ContentModel::Choice(_) => ContentModelType::Choice,
-            ContentModel::All(_) => ContentModelType::All,
-            ContentModel::ComplexExtension { .. } => ContentModelType::Sequence,
-            ContentModel::Empty => ContentModelType::Empty,
-            ContentModel::SimpleContent { .. } => ContentModelType::Empty,
-            ContentModel::Any { .. } => ContentModelType::Sequence,
-        };
-
-        let mut flattened = FlattenedChildren::with_content_model(content_model_type);
-
-        let mut visited = std::collections::HashSet::new();
-        let elements = self.collect_elements_with_inheritance(complex, &mut visited);
-
-        // Collect ordered elements into a temporary Vec, then convert to Arc<[String]>
-        let mut ordered: Vec<String> = Vec::with_capacity(elements.len());
-        for elem in &elements {
-            flattened
-                .constraints
-                .insert(elem.name.clone(), (elem.min_occurs, elem.max_occurs));
-            // Store element order for sequence validation
-            ordered.push(elem.name.clone());
-        }
-        flattened.ordered_elements = std::sync::Arc::from(ordered);
-
-        flattened
-    }
-
-    /// Collects all child elements from a complex type, including inherited elements.
-    pub(crate) fn collect_elements_with_inheritance(
-        &self,
-        complex: &ComplexType,
-        visited: &mut std::collections::HashSet<String>,
-    ) -> Vec<ElementDef> {
-        let mut elements = Vec::new();
-
-        match &complex.content {
-            ContentModel::Sequence(elems)
-            | ContentModel::Choice(elems)
-            | ContentModel::All(elems) => {
-                elements.extend(elems.iter().cloned());
-            }
-            ContentModel::ComplexExtension {
-                base_type,
-                elements: ext_elements,
-            } => {
-                if !visited.contains(base_type.as_str()) {
-                    visited.insert(base_type.clone());
-                    if let Some(TypeDef::Complex(base_complex)) =
-                        self.schema.get_type(base_type.as_str())
-                    {
-                        let base_elements =
-                            self.collect_elements_with_inheritance(base_complex, visited);
-                        elements.extend(base_elements);
-                    }
-                }
-                elements.extend(ext_elements.iter().cloned());
-            }
-            _ => {}
-        }
-
-        elements
     }
 }

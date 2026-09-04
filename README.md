@@ -615,6 +615,18 @@ cargo run -p fastxml-conformance --bin download
 cargo test -p fastxml-conformance
 ```
 
+## Organisation fork
+
+The `bloudraadpdf` fork uses the `feat/mangwhap` branch, based on `v0.9.0`.
+It retains the changes previously held in Mangwhap's external source copy.
+These include sequence validation on schema cache hits, XML attribute
+decoding with the reader's character encoding, and shared parser and
+validator code. It uses quick-xml 0.41 and ureq 3.
+
+Use a direct Git dependency with a full commit revision. No Cargo patch is
+required. The upstream tests, examples, and command-line tool remain in
+the fork.
+
 ## Development
 
 ```bash

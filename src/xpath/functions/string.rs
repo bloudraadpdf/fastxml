@@ -15,34 +15,45 @@ use crate::error::Result;
 use crate::xpath::error::XPathEvalError;
 use crate::xpath::types::{EvaluationContext, XPathValue};
 
+fn wrong_argument_count<T>(function: &str, expected: &str, found: usize) -> Result<T> {
+    Err(XPathEvalError::WrongArgumentCount {
+        function: function.to_string(),
+        expected: expected.to_string(),
+        found,
+    }
+    .into())
+}
+
+fn string_or_context(
+    args: Vec<XPathValue>,
+    ctx: &EvaluationContext<'_>,
+    function: &str,
+) -> Result<String> {
+    match args.len() {
+        0 => Ok(ctx.node.get_content().unwrap_or_default()),
+        1 => Ok(args[0].to_string_value()),
+        found => wrong_argument_count(function, "0 or 1", found),
+    }
+}
+
+fn string_arguments<const N: usize>(args: Vec<XPathValue>, function: &str) -> Result<[String; N]> {
+    let found = args.len();
+    let values: [XPathValue; N] = match args.try_into() {
+        Ok(values) => values,
+        Err(_) => return wrong_argument_count(function, &N.to_string(), found),
+    };
+    Ok(values.map(|value| value.to_string_value()))
+}
+
 /// `string([object])` - converts the argument to a string.
 pub fn fn_string(args: Vec<XPathValue>, ctx: &EvaluationContext<'_>) -> Result<XPathValue> {
-    let value = if args.is_empty() {
-        // Default: string value of context node
-        XPathValue::NodeSet(vec![ctx.node.clone()])
-    } else if args.len() == 1 {
-        args.into_iter().next().unwrap()
-    } else {
-        return Err(XPathEvalError::WrongArgumentCount {
-            function: "string".to_string(),
-            expected: "0 or 1".to_string(),
-            found: args.len(),
-        }
-        .into());
-    };
-
-    Ok(XPathValue::String(value.to_string_value()))
+    Ok(XPathValue::String(string_or_context(args, ctx, "string")?))
 }
 
 /// `concat(string, string, ...)` - concatenates all arguments.
 pub fn fn_concat(args: Vec<XPathValue>, _ctx: &EvaluationContext<'_>) -> Result<XPathValue> {
     if args.len() < 2 {
-        return Err(XPathEvalError::WrongArgumentCount {
-            function: "concat".to_string(),
-            expected: "at least 2".to_string(),
-            found: args.len(),
-        }
-        .into());
+        return wrong_argument_count("concat", "at least 2", args.len());
     }
 
     let result: String = args.into_iter().map(|v| v.to_string_value()).collect();
@@ -52,37 +63,13 @@ pub fn fn_concat(args: Vec<XPathValue>, _ctx: &EvaluationContext<'_>) -> Result<
 
 /// `starts-with(string, string)` - returns true if first string starts with second.
 pub fn fn_starts_with(args: Vec<XPathValue>, _ctx: &EvaluationContext<'_>) -> Result<XPathValue> {
-    if args.len() != 2 {
-        return Err(XPathEvalError::WrongArgumentCount {
-            function: "starts-with".to_string(),
-            expected: "2".to_string(),
-            found: args.len(),
-        }
-        .into());
-    }
-
-    let mut iter = args.into_iter();
-    let string = iter.next().unwrap().to_string_value();
-    let prefix = iter.next().unwrap().to_string_value();
-
+    let [string, prefix] = string_arguments(args, "starts-with")?;
     Ok(XPathValue::Boolean(string.starts_with(&prefix)))
 }
 
 /// `contains(haystack, needle)` - returns true if haystack contains needle.
 pub fn fn_contains(args: Vec<XPathValue>, _ctx: &EvaluationContext<'_>) -> Result<XPathValue> {
-    if args.len() != 2 {
-        return Err(XPathEvalError::WrongArgumentCount {
-            function: "contains".to_string(),
-            expected: "2".to_string(),
-            found: args.len(),
-        }
-        .into());
-    }
-
-    let mut iter = args.into_iter();
-    let haystack = iter.next().unwrap().to_string_value();
-    let needle = iter.next().unwrap().to_string_value();
-
+    let [haystack, needle] = string_arguments(args, "contains")?;
     Ok(XPathValue::Boolean(haystack.contains(&needle)))
 }
 
@@ -91,12 +78,7 @@ pub fn fn_contains(args: Vec<XPathValue>, _ctx: &EvaluationContext<'_>) -> Resul
 /// Note: XPath uses 1-based indexing and rounds to nearest integer.
 pub fn fn_substring(args: Vec<XPathValue>, _ctx: &EvaluationContext<'_>) -> Result<XPathValue> {
     if args.len() < 2 || args.len() > 3 {
-        return Err(XPathEvalError::WrongArgumentCount {
-            function: "substring".to_string(),
-            expected: "2 or 3".to_string(),
-            found: args.len(),
-        }
-        .into());
+        return wrong_argument_count("substring", "2 or 3", args.len());
     }
 
     let mut iter = args.into_iter();
@@ -137,18 +119,7 @@ pub fn fn_substring_before(
     args: Vec<XPathValue>,
     _ctx: &EvaluationContext<'_>,
 ) -> Result<XPathValue> {
-    if args.len() != 2 {
-        return Err(XPathEvalError::WrongArgumentCount {
-            function: "substring-before".to_string(),
-            expected: "2".to_string(),
-            found: args.len(),
-        }
-        .into());
-    }
-
-    let mut iter = args.into_iter();
-    let string = iter.next().unwrap().to_string_value();
-    let search = iter.next().unwrap().to_string_value();
+    let [string, search] = string_arguments(args, "substring-before")?;
 
     let result = if search.is_empty() {
         String::new()
@@ -166,18 +137,7 @@ pub fn fn_substring_after(
     args: Vec<XPathValue>,
     _ctx: &EvaluationContext<'_>,
 ) -> Result<XPathValue> {
-    if args.len() != 2 {
-        return Err(XPathEvalError::WrongArgumentCount {
-            function: "substring-after".to_string(),
-            expected: "2".to_string(),
-            found: args.len(),
-        }
-        .into());
-    }
-
-    let mut iter = args.into_iter();
-    let string = iter.next().unwrap().to_string_value();
-    let search = iter.next().unwrap().to_string_value();
+    let [string, search] = string_arguments(args, "substring-after")?;
 
     let result = if search.is_empty() {
         string
@@ -192,20 +152,7 @@ pub fn fn_substring_after(
 
 /// `string-length([string])` - returns the length of the string.
 pub fn fn_string_length(args: Vec<XPathValue>, ctx: &EvaluationContext<'_>) -> Result<XPathValue> {
-    let string = if args.is_empty() {
-        // Default: string value of context node
-        ctx.node.get_content().unwrap_or_default()
-    } else if args.len() == 1 {
-        args.into_iter().next().unwrap().to_string_value()
-    } else {
-        return Err(XPathEvalError::WrongArgumentCount {
-            function: "string-length".to_string(),
-            expected: "0 or 1".to_string(),
-            found: args.len(),
-        }
-        .into());
-    };
-
+    let string = string_or_context(args, ctx, "string-length")?;
     Ok(XPathValue::Number(string.chars().count() as f64))
 }
 
@@ -214,20 +161,7 @@ pub fn fn_normalize_space(
     args: Vec<XPathValue>,
     ctx: &EvaluationContext<'_>,
 ) -> Result<XPathValue> {
-    let string = if args.is_empty() {
-        ctx.node.get_content().unwrap_or_default()
-    } else if args.len() == 1 {
-        args.into_iter().next().unwrap().to_string_value()
-    } else {
-        return Err(XPathEvalError::WrongArgumentCount {
-            function: "normalize-space".to_string(),
-            expected: "0 or 1".to_string(),
-            found: args.len(),
-        }
-        .into());
-    };
-
-    // Split by whitespace and rejoin with single spaces
+    let string = string_or_context(args, ctx, "normalize-space")?;
     let result: String = string.split_whitespace().collect::<Vec<_>>().join(" ");
 
     Ok(XPathValue::String(result))
@@ -235,19 +169,7 @@ pub fn fn_normalize_space(
 
 /// `translate(string, from, to)` - replaces characters.
 pub fn fn_translate(args: Vec<XPathValue>, _ctx: &EvaluationContext<'_>) -> Result<XPathValue> {
-    if args.len() != 3 {
-        return Err(XPathEvalError::WrongArgumentCount {
-            function: "translate".to_string(),
-            expected: "3".to_string(),
-            found: args.len(),
-        }
-        .into());
-    }
-
-    let mut iter = args.into_iter();
-    let string = iter.next().unwrap().to_string_value();
-    let from = iter.next().unwrap().to_string_value();
-    let to = iter.next().unwrap().to_string_value();
+    let [string, from, to] = string_arguments(args, "translate")?;
 
     let from_chars: Vec<char> = from.chars().collect();
     let to_chars: Vec<char> = to.chars().collect();
@@ -256,15 +178,12 @@ pub fn fn_translate(args: Vec<XPathValue>, _ctx: &EvaluationContext<'_>) -> Resu
         .chars()
         .filter_map(|c| {
             if let Some(idx) = from_chars.iter().position(|&fc| fc == c) {
-                // Character found in 'from' string
                 if idx < to_chars.len() {
                     Some(to_chars[idx])
                 } else {
-                    // No corresponding char in 'to', remove it
                     None
                 }
             } else {
-                // Character not in 'from', keep it
                 Some(c)
             }
         })
@@ -276,554 +195,157 @@ pub fn fn_translate(args: Vec<XPathValue>, _ctx: &EvaluationContext<'_>) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::document::XmlDocument;
     use crate::namespace::NamespaceResolver;
     use crate::xpath::functions::evaluate_function;
 
-    fn create_test_document() -> XmlDocument {
-        crate::parse(
-            "<root><item id=\"1\">10</item><item id=\"2\">20</item><item id=\"3\">30</item></root>",
-        )
-        .unwrap()
+    const TEST_XML: &str = "<root><item id=\"1\">10</item><item id=\"2\">20</item></root>";
+
+    fn text(value: &str) -> XPathValue {
+        XPathValue::String(value.to_string())
     }
 
-    fn create_context<'a>(
-        doc: &'a XmlDocument,
-        node: &crate::node::XmlNode,
-    ) -> EvaluationContext<'a> {
-        EvaluationContext::new(node.clone(), doc, NamespaceResolver::new())
+    fn texts<const N: usize>(values: [&str; N]) -> Vec<XPathValue> {
+        values.into_iter().map(text).collect()
+    }
+
+    fn evaluate_in(xml: &str, function: &str, args: Vec<XPathValue>) -> Result<XPathValue> {
+        let document = crate::parse(xml).unwrap();
+        let root = document.get_root_element().unwrap();
+        let context = EvaluationContext::new(root, &document, NamespaceResolver::new());
+        evaluate_function(function, args, &context)
+    }
+
+    fn evaluate(function: &str, args: Vec<XPathValue>) -> Result<XPathValue> {
+        evaluate_in(TEST_XML, function, args)
+    }
+
+    fn assert_string(function: &str, args: Vec<XPathValue>, expected: &str) {
+        assert_eq!(
+            evaluate(function, args).unwrap().to_string_value(),
+            expected
+        );
+    }
+
+    fn assert_boolean(function: &str, args: Vec<XPathValue>, expected: bool) {
+        assert_eq!(evaluate(function, args).unwrap().to_boolean(), expected);
     }
 
     #[test]
-    fn test_fn_string_with_arg() {
-        let doc = create_test_document();
-        let root = doc.get_root_element().unwrap();
-        let ctx = create_context(&doc, &root);
-
-        let result = evaluate_function("string", vec![XPathValue::Number(42.0)], &ctx).unwrap();
-        assert_eq!(result.to_string_value(), "42");
-    }
-
-    #[test]
-    fn test_fn_string_no_arg() {
-        let doc = crate::parse("<root>hello</root>").unwrap();
-        let root = doc.get_root_element().unwrap();
-        let ctx = create_context(&doc, &root);
-
-        let result = evaluate_function("string", vec![], &ctx).unwrap();
+    fn string_and_concat_values() {
+        assert_string("string", vec![XPathValue::Number(42.0)], "42");
+        let result = evaluate_in("<root>hello</root>", "string", vec![]).unwrap();
         assert_eq!(result.to_string_value(), "hello");
+        assert_string("concat", texts(["Hello", " ", "World"]), "Hello World");
     }
 
     #[test]
-    fn test_fn_string_wrong_args() {
-        let doc = create_test_document();
-        let root = doc.get_root_element().unwrap();
-        let ctx = create_context(&doc, &root);
+    fn string_predicates() {
+        assert_boolean("starts-with", texts(["Hello World", "Hello"]), true);
+        assert_boolean("starts-with", texts(["Hello World", "World"]), false);
+        assert_boolean("contains", texts(["Hello World", "o W"]), true);
+        assert_boolean("contains", texts(["Hello World", "xyz"]), false);
+    }
 
-        let result = evaluate_function(
-            "string",
-            vec![XPathValue::Number(1.0), XPathValue::Number(2.0)],
-            &ctx,
+    #[test]
+    fn substring_ranges() {
+        assert_string(
+            "substring",
+            vec![text("12345"), XPathValue::Number(2.0)],
+            "2345",
         );
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_fn_concat() {
-        let doc = create_test_document();
-        let root = doc.get_root_element().unwrap();
-        let ctx = create_context(&doc, &root);
-
-        let result = evaluate_function(
-            "concat",
-            vec![
-                XPathValue::String("Hello".to_string()),
-                XPathValue::String(" ".to_string()),
-                XPathValue::String("World".to_string()),
-            ],
-            &ctx,
-        )
-        .unwrap();
-        assert_eq!(result.to_string_value(), "Hello World");
-    }
-
-    #[test]
-    fn test_fn_concat_wrong_args() {
-        let doc = create_test_document();
-        let root = doc.get_root_element().unwrap();
-        let ctx = create_context(&doc, &root);
-
-        let result = evaluate_function(
-            "concat",
-            vec![XPathValue::String("only one".to_string())],
-            &ctx,
-        );
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_fn_starts_with_true() {
-        let doc = create_test_document();
-        let root = doc.get_root_element().unwrap();
-        let ctx = create_context(&doc, &root);
-
-        let result = evaluate_function(
-            "starts-with",
-            vec![
-                XPathValue::String("Hello World".to_string()),
-                XPathValue::String("Hello".to_string()),
-            ],
-            &ctx,
-        )
-        .unwrap();
-        assert!(result.to_boolean());
-    }
-
-    #[test]
-    fn test_fn_starts_with_false() {
-        let doc = create_test_document();
-        let root = doc.get_root_element().unwrap();
-        let ctx = create_context(&doc, &root);
-
-        let result = evaluate_function(
-            "starts-with",
-            vec![
-                XPathValue::String("Hello World".to_string()),
-                XPathValue::String("World".to_string()),
-            ],
-            &ctx,
-        )
-        .unwrap();
-        assert!(!result.to_boolean());
-    }
-
-    #[test]
-    fn test_fn_contains_true() {
-        let doc = create_test_document();
-        let root = doc.get_root_element().unwrap();
-        let ctx = create_context(&doc, &root);
-
-        let result = evaluate_function(
-            "contains",
-            vec![
-                XPathValue::String("Hello World".to_string()),
-                XPathValue::String("o W".to_string()),
-            ],
-            &ctx,
-        )
-        .unwrap();
-        assert!(result.to_boolean());
-    }
-
-    #[test]
-    fn test_fn_substring_two_args() {
-        let doc = create_test_document();
-        let root = doc.get_root_element().unwrap();
-        let ctx = create_context(&doc, &root);
-
-        let result = evaluate_function(
+        assert_string(
             "substring",
             vec![
-                XPathValue::String("12345".to_string()),
-                XPathValue::Number(2.0),
-            ],
-            &ctx,
-        )
-        .unwrap();
-        assert_eq!(result.to_string_value(), "2345");
-    }
-
-    #[test]
-    fn test_fn_substring_three_args() {
-        let doc = create_test_document();
-        let root = doc.get_root_element().unwrap();
-        let ctx = create_context(&doc, &root);
-
-        let result = evaluate_function(
-            "substring",
-            vec![
-                XPathValue::String("12345".to_string()),
+                text("12345"),
                 XPathValue::Number(2.0),
                 XPathValue::Number(3.0),
             ],
-            &ctx,
-        )
-        .unwrap();
-        assert_eq!(result.to_string_value(), "234");
-    }
-
-    #[test]
-    fn test_fn_substring_before() {
-        let doc = create_test_document();
-        let root = doc.get_root_element().unwrap();
-        let ctx = create_context(&doc, &root);
-
-        let result = evaluate_function(
-            "substring-before",
-            vec![
-                XPathValue::String("1999/04/01".to_string()),
-                XPathValue::String("/".to_string()),
-            ],
-            &ctx,
-        )
-        .unwrap();
-        assert_eq!(result.to_string_value(), "1999");
-    }
-
-    #[test]
-    fn test_fn_substring_after() {
-        let doc = create_test_document();
-        let root = doc.get_root_element().unwrap();
-        let ctx = create_context(&doc, &root);
-
-        let result = evaluate_function(
-            "substring-after",
-            vec![
-                XPathValue::String("1999/04/01".to_string()),
-                XPathValue::String("/".to_string()),
-            ],
-            &ctx,
-        )
-        .unwrap();
-        assert_eq!(result.to_string_value(), "04/01");
-    }
-
-    #[test]
-    fn test_fn_string_length_with_arg() {
-        let doc = create_test_document();
-        let root = doc.get_root_element().unwrap();
-        let ctx = create_context(&doc, &root);
-
-        let result = evaluate_function(
-            "string-length",
-            vec![XPathValue::String("hello".to_string())],
-            &ctx,
-        )
-        .unwrap();
-        assert_eq!(result.to_number(), 5.0);
-    }
-
-    #[test]
-    fn test_fn_normalize_space_with_arg() {
-        let doc = create_test_document();
-        let root = doc.get_root_element().unwrap();
-        let ctx = create_context(&doc, &root);
-
-        let result = evaluate_function(
-            "normalize-space",
-            vec![XPathValue::String("  hello   world  ".to_string())],
-            &ctx,
-        )
-        .unwrap();
-        assert_eq!(result.to_string_value(), "hello world");
-    }
-
-    #[test]
-    fn test_fn_translate_basic() {
-        let doc = create_test_document();
-        let root = doc.get_root_element().unwrap();
-        let ctx = create_context(&doc, &root);
-
-        let result = evaluate_function(
-            "translate",
-            vec![
-                XPathValue::String("bar".to_string()),
-                XPathValue::String("abc".to_string()),
-                XPathValue::String("ABC".to_string()),
-            ],
-            &ctx,
-        )
-        .unwrap();
-        assert_eq!(result.to_string_value(), "BAr");
-    }
-
-    #[test]
-    fn test_fn_translate_remove_chars() {
-        let doc = create_test_document();
-        let root = doc.get_root_element().unwrap();
-        let ctx = create_context(&doc, &root);
-
-        let result = evaluate_function(
-            "translate",
-            vec![
-                XPathValue::String("--aaa--".to_string()),
-                XPathValue::String("abc-".to_string()),
-                XPathValue::String("ABC".to_string()),
-            ],
-            &ctx,
-        )
-        .unwrap();
-        assert_eq!(result.to_string_value(), "AAA");
-    }
-
-    #[test]
-    fn test_fn_starts_with_wrong_args() {
-        let doc = create_test_document();
-        let root = doc.get_root_element().unwrap();
-        let ctx = create_context(&doc, &root);
-
-        let result = evaluate_function(
-            "starts-with",
-            vec![XPathValue::String("test".to_string())],
-            &ctx,
+            "234",
         );
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_fn_contains_false() {
-        let doc = create_test_document();
-        let root = doc.get_root_element().unwrap();
-        let ctx = create_context(&doc, &root);
-
-        let result = evaluate_function(
-            "contains",
-            vec![
-                XPathValue::String("Hello World".to_string()),
-                XPathValue::String("xyz".to_string()),
-            ],
-            &ctx,
-        )
-        .unwrap();
-        assert!(!result.to_boolean());
-    }
-
-    #[test]
-    fn test_fn_contains_wrong_args() {
-        let doc = create_test_document();
-        let root = doc.get_root_element().unwrap();
-        let ctx = create_context(&doc, &root);
-
-        let result = evaluate_function("contains", vec![], &ctx);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_fn_substring_nan_start() {
-        let doc = create_test_document();
-        let root = doc.get_root_element().unwrap();
-        let ctx = create_context(&doc, &root);
-
-        let result = evaluate_function(
+        assert_string(
+            "substring",
+            vec![text("12345"), XPathValue::Number(f64::NAN)],
+            "",
+        );
+        assert_string(
             "substring",
             vec![
-                XPathValue::String("12345".to_string()),
-                XPathValue::Number(f64::NAN),
-            ],
-            &ctx,
-        )
-        .unwrap();
-        assert_eq!(result.to_string_value(), "");
-    }
-
-    #[test]
-    fn test_fn_substring_nan_length() {
-        let doc = create_test_document();
-        let root = doc.get_root_element().unwrap();
-        let ctx = create_context(&doc, &root);
-
-        let result = evaluate_function(
-            "substring",
-            vec![
-                XPathValue::String("12345".to_string()),
+                text("12345"),
                 XPathValue::Number(1.0),
                 XPathValue::Number(f64::NAN),
             ],
-            &ctx,
-        )
-        .unwrap();
-        assert_eq!(result.to_string_value(), "");
-    }
-
-    #[test]
-    fn test_fn_substring_wrong_args() {
-        let doc = create_test_document();
-        let root = doc.get_root_element().unwrap();
-        let ctx = create_context(&doc, &root);
-
-        let result = evaluate_function(
-            "substring",
-            vec![XPathValue::String("test".to_string())],
-            &ctx,
+            "",
         );
-        assert!(result.is_err());
     }
 
     #[test]
-    fn test_fn_substring_before_not_found() {
-        let doc = create_test_document();
-        let root = doc.get_root_element().unwrap();
-        let ctx = create_context(&doc, &root);
-
-        let result = evaluate_function(
-            "substring-before",
-            vec![
-                XPathValue::String("hello".to_string()),
-                XPathValue::String("xyz".to_string()),
-            ],
-            &ctx,
-        )
-        .unwrap();
-        assert_eq!(result.to_string_value(), "");
+    fn substring_boundaries() {
+        for (function, expected) in [("substring-before", "1999"), ("substring-after", "04/01")] {
+            assert_string(function, texts(["1999/04/01", "/"]), expected);
+        }
+        for function in ["substring-before", "substring-after"] {
+            assert_string(function, texts(["hello", "xyz"]), "");
+        }
+        assert_string("substring-before", texts(["hello", ""]), "");
+        assert_string("substring-after", texts(["hello", ""]), "hello");
     }
 
     #[test]
-    fn test_fn_substring_before_empty_search() {
-        let doc = create_test_document();
-        let root = doc.get_root_element().unwrap();
-        let ctx = create_context(&doc, &root);
-
-        let result = evaluate_function(
-            "substring-before",
-            vec![
-                XPathValue::String("hello".to_string()),
-                XPathValue::String("".to_string()),
-            ],
-            &ctx,
-        )
-        .unwrap();
-        assert_eq!(result.to_string_value(), "");
-    }
-
-    #[test]
-    fn test_fn_substring_before_wrong_args() {
-        let doc = create_test_document();
-        let root = doc.get_root_element().unwrap();
-        let ctx = create_context(&doc, &root);
-
-        let result = evaluate_function("substring-before", vec![], &ctx);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_fn_substring_after_not_found() {
-        let doc = create_test_document();
-        let root = doc.get_root_element().unwrap();
-        let ctx = create_context(&doc, &root);
-
-        let result = evaluate_function(
-            "substring-after",
-            vec![
-                XPathValue::String("hello".to_string()),
-                XPathValue::String("xyz".to_string()),
-            ],
-            &ctx,
-        )
-        .unwrap();
-        assert_eq!(result.to_string_value(), "");
-    }
-
-    #[test]
-    fn test_fn_substring_after_empty_search() {
-        let doc = create_test_document();
-        let root = doc.get_root_element().unwrap();
-        let ctx = create_context(&doc, &root);
-
-        let result = evaluate_function(
-            "substring-after",
-            vec![
-                XPathValue::String("hello".to_string()),
-                XPathValue::String("".to_string()),
-            ],
-            &ctx,
-        )
-        .unwrap();
-        assert_eq!(result.to_string_value(), "hello");
-    }
-
-    #[test]
-    fn test_fn_substring_after_wrong_args() {
-        let doc = create_test_document();
-        let root = doc.get_root_element().unwrap();
-        let ctx = create_context(&doc, &root);
-
-        let result = evaluate_function("substring-after", vec![], &ctx);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_fn_string_length_no_arg() {
-        let doc = crate::parse("<root>hello</root>").unwrap();
-        let root = doc.get_root_element().unwrap();
-        let ctx = create_context(&doc, &root);
-
-        let result = evaluate_function("string-length", vec![], &ctx).unwrap();
+    fn string_length_counts_characters() {
+        assert_eq!(
+            evaluate("string-length", texts(["hello"]))
+                .unwrap()
+                .to_number(),
+            5.0
+        );
+        assert_eq!(
+            evaluate("string-length", texts(["日本語"]))
+                .unwrap()
+                .to_number(),
+            3.0
+        );
+        let result = evaluate_in("<root>hello</root>", "string-length", vec![]).unwrap();
         assert_eq!(result.to_number(), 5.0);
     }
 
     #[test]
-    fn test_fn_string_length_unicode() {
-        let doc = create_test_document();
-        let root = doc.get_root_element().unwrap();
-        let ctx = create_context(&doc, &root);
-
-        let result = evaluate_function(
-            "string-length",
-            vec![XPathValue::String("日本語".to_string())],
-            &ctx,
-        )
-        .unwrap();
-        assert_eq!(result.to_number(), 3.0);
-    }
-
-    #[test]
-    fn test_fn_string_length_wrong_args() {
-        let doc = create_test_document();
-        let root = doc.get_root_element().unwrap();
-        let ctx = create_context(&doc, &root);
-
-        let result = evaluate_function(
-            "string-length",
-            vec![
-                XPathValue::String("a".to_string()),
-                XPathValue::String("b".to_string()),
-            ],
-            &ctx,
+    fn normalize_space_values() {
+        assert_string(
+            "normalize-space",
+            texts(["  hello   world  "]),
+            "hello world",
         );
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_fn_normalize_space_no_arg() {
-        let doc = crate::parse("<root>  hello   world  </root>").unwrap();
-        let root = doc.get_root_element().unwrap();
-        let ctx = create_context(&doc, &root);
-
-        let result = evaluate_function("normalize-space", vec![], &ctx).unwrap();
+        let result =
+            evaluate_in("<root>  hello   world  </root>", "normalize-space", vec![]).unwrap();
         assert_eq!(result.to_string_value(), "hello world");
     }
 
     #[test]
-    fn test_fn_normalize_space_wrong_args() {
-        let doc = create_test_document();
-        let root = doc.get_root_element().unwrap();
-        let ctx = create_context(&doc, &root);
-
-        let result = evaluate_function(
-            "normalize-space",
-            vec![
-                XPathValue::String("a".to_string()),
-                XPathValue::String("b".to_string()),
-            ],
-            &ctx,
-        );
-        assert!(result.is_err());
+    fn translate_values() {
+        assert_string("translate", texts(["bar", "abc", "ABC"]), "BAr");
+        assert_string("translate", texts(["--aaa--", "abc-", "ABC"]), "AAA");
     }
 
     #[test]
-    fn test_fn_translate_wrong_args() {
-        let doc = create_test_document();
-        let root = doc.get_root_element().unwrap();
-        let ctx = create_context(&doc, &root);
+    fn wrong_argument_counts() {
+        let cases = [
+            (
+                "string",
+                vec![XPathValue::Number(1.0), XPathValue::Number(2.0)],
+            ),
+            ("concat", texts(["only one"])),
+            ("starts-with", texts(["test"])),
+            ("contains", vec![]),
+            ("substring", texts(["test"])),
+            ("substring-before", vec![]),
+            ("substring-after", vec![]),
+            ("string-length", texts(["a", "b"])),
+            ("normalize-space", texts(["a", "b"])),
+            ("translate", texts(["test", "abc"])),
+        ];
 
-        let result = evaluate_function(
-            "translate",
-            vec![
-                XPathValue::String("test".to_string()),
-                XPathValue::String("abc".to_string()),
-            ],
-            &ctx,
-        );
-        assert!(result.is_err());
+        for (function, args) in cases {
+            assert!(evaluate(function, args).is_err(), "{function}");
+        }
     }
 }

@@ -43,6 +43,7 @@
 
 pub mod builtin;
 pub mod compiler;
+mod constraint_model;
 pub mod constraints;
 pub mod content_model;
 pub mod error;
@@ -542,49 +543,20 @@ mod tests {
 #[cfg(all(test, feature = "tokio"))]
 mod async_tests {
     use super::*;
-    use crate::error::Result;
-    use crate::schema::fetcher::{AsyncSchemaFetcher, FetchResult};
-    use parking_lot::RwLock;
-    use std::collections::HashMap;
-    use std::sync::Arc;
+    use crate::schema::fetcher::test_support::AsyncTrackingFetcher;
 
-    /// Mock async fetcher for testing
-    struct MockAsyncFetcher {
-        responses: Arc<RwLock<HashMap<String, Vec<u8>>>>,
-    }
-
-    impl MockAsyncFetcher {
-        fn new() -> Self {
-            Self {
-                responses: Arc::new(RwLock::new(HashMap::new())),
-            }
-        }
-
-        fn add_response(&self, url: &str, content: &[u8]) {
-            self.responses
-                .write()
-                .insert(url.to_string(), content.to_vec());
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl AsyncSchemaFetcher for MockAsyncFetcher {
-        async fn fetch(&self, url: &str) -> Result<FetchResult> {
-            let responses = self.responses.read();
-            if let Some(content) = responses.get(url) {
-                Ok(FetchResult {
-                    content: content.clone(),
-                    final_url: url.to_string(),
-                    redirected: false,
-                })
-            } else {
-                Err(crate::schema::fetcher::error::FetchError::RequestFailed {
-                    url: url.to_string(),
-                    message: "Not found".to_string(),
-                }
-                .into())
-            }
-        }
+    fn simple_type_schema(namespace: &str, name: &str, pattern: &str) -> String {
+        format!(
+            r#"<?xml version="1.0"?>
+        <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
+                   targetNamespace="{namespace}">
+            <xs:simpleType name="{name}">
+                <xs:restriction base="xs:string">
+                    <xs:pattern value="{pattern}"/>
+                </xs:restriction>
+            </xs:simpleType>
+        </xs:schema>"#
+        )
     }
 
     #[tokio::test]
@@ -595,7 +567,7 @@ mod async_tests {
             <xs:element name="root" type="xs:string"/>
         </xs:schema>"#;
 
-        let fetcher = MockAsyncFetcher::new();
+        let fetcher = AsyncTrackingFetcher::new();
 
         let schema =
             parse_xsd_with_imports_async(xsd.as_bytes(), "http://example.com/test.xsd", &fetcher)
@@ -615,15 +587,11 @@ mod async_tests {
 
     #[tokio::test]
     async fn test_parse_xsd_with_imports_async_with_import() {
-        let types_xsd = r#"<?xml version="1.0"?>
-        <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
-                   targetNamespace="http://example.com/types">
-            <xs:simpleType name="EmailType">
-                <xs:restriction base="xs:string">
-                    <xs:pattern value="[^@]+@[^@]+\.[^@]+"/>
-                </xs:restriction>
-            </xs:simpleType>
-        </xs:schema>"#;
+        let types_xsd = simple_type_schema(
+            "http://example.com/types",
+            "EmailType",
+            r"[^@]+@[^@]+\.[^@]+",
+        );
 
         let main_xsd = r#"<?xml version="1.0"?>
         <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
@@ -639,7 +607,7 @@ mod async_tests {
             </xs:element>
         </xs:schema>"#;
 
-        let fetcher = MockAsyncFetcher::new();
+        let fetcher = AsyncTrackingFetcher::new();
         fetcher.add_response("http://example.com/types.xsd", types_xsd.as_bytes());
 
         let schema = parse_xsd_with_imports_async(
@@ -659,15 +627,7 @@ mod async_tests {
 
     #[tokio::test]
     async fn test_parse_xsd_with_imports_async_nested_imports() {
-        let base_xsd = r#"<?xml version="1.0"?>
-        <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
-                   targetNamespace="http://example.com/base">
-            <xs:simpleType name="IDType">
-                <xs:restriction base="xs:string">
-                    <xs:pattern value="[A-Z0-9]+"/>
-                </xs:restriction>
-            </xs:simpleType>
-        </xs:schema>"#;
+        let base_xsd = simple_type_schema("http://example.com/base", "IDType", "[A-Z0-9]+");
 
         let types_xsd = r#"<?xml version="1.0"?>
         <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
@@ -689,7 +649,7 @@ mod async_tests {
             <xs:element name="entity" type="t:EntityType"/>
         </xs:schema>"#;
 
-        let fetcher = MockAsyncFetcher::new();
+        let fetcher = AsyncTrackingFetcher::new();
         fetcher.add_response("http://example.com/base.xsd", base_xsd.as_bytes());
         fetcher.add_response("http://example.com/types.xsd", types_xsd.as_bytes());
 

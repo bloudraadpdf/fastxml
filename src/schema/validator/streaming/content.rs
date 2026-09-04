@@ -8,6 +8,7 @@ use crate::schema::xsd::facets::FacetValidator;
 use crate::schema::xsd::primitive::PrimitiveKind;
 
 use super::super::ValidationMode;
+use super::super::lookup::facet_constraints;
 use super::super::state::ElementContext;
 use super::OnePassSchemaValidator;
 
@@ -42,42 +43,33 @@ impl OnePassSchemaValidator {
         // This is important when the same element name exists both as a global element
         // and as an inline element in the parent's content model with different types.
         // For example, gml:exterior in Solid (SurfacePropertyType) vs Polygon (AbstractRingPropertyType)
-        if is_expected_by_parent {
+        let element_type = if is_expected_by_parent {
             // Try inline element first - declared in parent's type definition
             let (inline_type_ref, inline_flattened) = self.get_inline_element_info(name);
 
             // Use inline type if available, otherwise fall back to global element
-            let (type_ref, flattened_children) =
-                if inline_type_ref.is_some() || inline_flattened.is_some() {
-                    (inline_type_ref, inline_flattened)
-                } else if let Some(elem) = elem_def {
-                    // Fall back to global element
+            if inline_type_ref.is_some() || inline_flattened.is_some() {
+                Some((inline_type_ref, inline_flattened))
+            } else {
+                // Fall back to global element
+                Some(elem_def.map_or((None, None), |elem| {
                     (
                         elem.type_ref.clone(),
                         self.get_flattened_children_for_element(elem),
                     )
-                } else {
-                    (None, None)
-                };
-
-            // Check max_occurs against parent's expected constraints
-            self.validate_max_occurs(name);
-
-            // Check sequence order against parent's expected constraints
-            self.validate_sequence_order(name);
-
-            // Update current element context with type info
-            if let Some(ctx) = self.state.current_element_mut() {
-                ctx.schema_validated = true;
-                ctx.type_ref = type_ref;
-                ctx.flattened_children = flattened_children;
-                ctx.nillable = elem_nillable;
+                }))
             }
-        } else if let Some(elem) = elem_def {
+        } else {
             // Global element found - get type information from cache
-            let type_ref = elem.type_ref.clone();
-            let flattened_children = self.get_flattened_children_for_element(elem);
+            elem_def.map(|elem| {
+                (
+                    elem.type_ref.clone(),
+                    self.get_flattened_children_for_element(elem),
+                )
+            })
+        };
 
+        if let Some((type_ref, flattened_children)) = element_type {
             // Check max_occurs against parent's expected constraints
             self.validate_max_occurs(name);
 
@@ -218,7 +210,7 @@ impl OnePassSchemaValidator {
         // User-declared facets. Skip on empty content so we don't double up
         // on top of any primitive-level "empty value" error.
         if !ctx.text_content.is_empty() {
-            let constraints = self.create_facet_constraints(simple);
+            let constraints = facet_constraints(simple);
             let validator = FacetValidator::new(&constraints);
             if let Err(facet_error) = validator.validate(&ctx.text_content) {
                 let error = self

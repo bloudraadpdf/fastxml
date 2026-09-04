@@ -12,6 +12,99 @@ use crate::schema::error::SchemaError;
 
 use super::super::types::XsdSchema;
 
+pub(super) struct ResolutionState {
+    schemas: HashMap<String, XsdSchema>,
+    resolving: HashSet<String>,
+}
+
+impl ResolutionState {
+    pub(super) fn new() -> Self {
+        Self {
+            schemas: HashMap::new(),
+            resolving: HashSet::new(),
+        }
+    }
+
+    pub(super) fn contains(&self, uri: &str) -> bool {
+        self.schemas.contains_key(uri)
+    }
+
+    pub(super) fn insert_entry(&mut self, content: &[u8], uri: &str) -> Result<()> {
+        let schema = super::super::parser::parse_xsd_ast(content)?;
+        self.schemas.insert(uri.to_string(), schema);
+        Ok(())
+    }
+
+    pub(super) fn begin(&mut self, uri: &str) -> Result<Vec<String>> {
+        check_cycle(uri, &self.resolving)?;
+        self.resolving.insert(uri.to_string());
+        let schema = self
+            .schemas
+            .get(uri)
+            .ok_or_else(|| SchemaError::SchemaNotFound {
+                uri: uri.to_string(),
+            })?;
+        Ok(schema
+            .imports
+            .iter()
+            .filter_map(|import| import.schema_location.clone())
+            .chain(
+                schema
+                    .includes
+                    .iter()
+                    .map(|include| include.schema_location.clone()),
+            )
+            .collect())
+    }
+
+    pub(super) fn insert_dependency(&mut self, uri: String, schema: XsdSchema) {
+        self.schemas.insert(uri, schema);
+    }
+
+    pub(super) fn finish(&mut self, uri: &str) {
+        self.resolving.remove(uri);
+    }
+
+    pub(super) fn take_entry_last(&mut self, entry_uri: &str) -> Vec<XsdSchema> {
+        let mut schemas = self
+            .schemas
+            .iter()
+            .filter(|(uri, _)| uri.as_str() != entry_uri)
+            .map(|(_, schema)| schema.clone())
+            .collect::<Vec<_>>();
+        if let Some(entry) = self.schemas.remove(entry_uri) {
+            schemas.push(entry);
+        }
+        schemas
+    }
+
+    pub(super) fn take_all(self) -> Vec<XsdSchema> {
+        self.schemas.into_values().collect()
+    }
+
+    pub(super) fn into_schemas(self) -> HashMap<String, XsdSchema> {
+        self.schemas
+    }
+}
+
+macro_rules! impl_resolution_outputs {
+    () => {
+        /// Consumes the resolver and returns all accumulated schemas.
+        pub fn take_all_schemas(self) -> Vec<super::super::types::XsdSchema> {
+            self.state.take_all()
+        }
+
+        /// Consumes the resolver and returns the schemas indexed by URI.
+        pub fn into_schemas(
+            self,
+        ) -> std::collections::HashMap<String, super::super::types::XsdSchema> {
+            self.state.into_schemas()
+        }
+    };
+}
+
+pub(super) use impl_resolution_outputs;
+
 /// Extracts dependency URIs from a schema.
 ///
 /// Collects all import and include locations and resolves them against the base URI.

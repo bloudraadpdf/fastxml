@@ -537,10 +537,7 @@ fn create_abstract_geometry_type() -> ComplexType {
         base_type: gml::ABSTRACT_GML_TYPE.to_string(),
         elements: Vec::new(),
     };
-    ct.attributes
-        .push(AttributeDef::new("srsName").with_type(xs::ANY_URI));
-    ct.attributes
-        .push(AttributeDef::new("srsDimension").with_type(xs::POSITIVE_INTEGER));
+    add_spatial_reference_attributes(&mut ct);
     ct
 }
 
@@ -599,11 +596,17 @@ fn create_envelope_type() -> ComplexType {
         ElementDef::new("lowerCorner").with_type(xs::STRING),
         ElementDef::new("upperCorner").with_type(xs::STRING),
     ]);
-    ct.attributes
-        .push(AttributeDef::new("srsName").with_type(xs::ANY_URI));
-    ct.attributes
-        .push(AttributeDef::new("srsDimension").with_type(xs::POSITIVE_INTEGER));
+    add_spatial_reference_attributes(&mut ct);
     ct
+}
+
+fn add_spatial_reference_attributes(complex_type: &mut ComplexType) {
+    complex_type
+        .attributes
+        .push(AttributeDef::new("srsName").with_type(xs::ANY_URI));
+    complex_type
+        .attributes
+        .push(AttributeDef::new("srsDimension").with_type(xs::POSITIVE_INTEGER));
 }
 
 fn create_bounding_shape_type() -> ComplexType {
