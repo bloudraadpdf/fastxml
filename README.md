@@ -617,7 +617,7 @@ cargo test -p fastxml-conformance
 
 ## Organisation fork
 
-The `bloudraadpdf` fork uses the `feat/mangwhap` branch, based on `v0.9.0`.
+The organisation fork uses the `patch/v0.9.0` branch.
 It retains the changes previously held in Mangwhap's external source copy.
 These include sequence validation on schema cache hits, XML attribute
 decoding with the reader's character encoding, and shared parser and
